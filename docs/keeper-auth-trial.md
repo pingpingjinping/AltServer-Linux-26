@@ -14,6 +14,7 @@ Compared with `pingpingjinping/altkeeper` at
 | AuthKit client identity | Anisette26 advertised Mac17,3 / Xcode. Match Keeper's Mac15,7 / macOS 27.0 / com.apple.akd/1.0 defaults instead. |
 | HTTP User-Agent | Keeper uses modern `AuthKit/1 ... Xcode/26.0`, not the older `akd/1.0 CFNetwork/808.1.4`. Retain the modern AltServer default and make it configurable with `ALTSERVER_GSA_USER_AGENT`. Match it in Anisette's `/v3/client_info` via `ANISETTE_USER_AGENT`. |
 | Connection handling | AltServer26 already creates a fresh cpprest client and sends `Connection: close` for GrandSlam. Retain that implementation. |
+| Authentication build path | Exclude the duplicate `AltServer_patched/AppleAPI+Authentication.cpp` from main objects so the linker actually uses the patched AltSign implementation, compiled with clang for CoreCrypto. |
 | Accept header | Match Keeper's `text/x-xml-plist` for GrandSlam. |
 | Timestamp | Generate an explicit UTC timestamp with exactly one `Z`, regardless of server timezone or fractional seconds. |
 | Diagnostics | Remove raw Anisette payloads and authentication header values. Reject malformed or failed Anisette responses before constructing an authentication object. |

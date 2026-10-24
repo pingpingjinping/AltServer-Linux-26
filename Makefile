@@ -66,6 +66,9 @@ main_override_src := $(wildcard $(main_override_srcroot)/*.cpp)
 # Build directly from the checked-in, known-working patched AltServer sources.
 main_orisrc := $(wildcard $(main_patched_root)/*.cpp) $(wildcard $(main_patched_root)/*.c)
 main_orisrc := $(filter-out $(main_patched_root)/AltServer.cpp, $(main_orisrc))
+# Authentication is compiled once by AltSign.mak (with clang for CoreCrypto).
+# A duplicate copy here otherwise shadows AltSign's fixes at final link time.
+main_orisrc := $(filter-out $(main_patched_root)/AppleAPI+Authentication.cpp, $(main_orisrc))
 main_orisrc := $(filter-out $(main_override_src:$(main_override_srcroot)/%=$(main_patched_root)/%), $(main_orisrc))
 
 #$(BUILD_DIR)/objs/%.c.o : $(BUILD_DIR)/%.c
