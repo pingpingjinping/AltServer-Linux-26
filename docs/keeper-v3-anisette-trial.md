@@ -71,6 +71,11 @@ using the same keychain identifier and adi.pb; UUID and local-user ID are derive
 as in Keeper. The client description, serial number, locale and timezone stay
 the same as the existing bridge. The original trial state is not modified.
 Calls are serialized and there is no automatic fallback to cached RPC data.
+The provider POST uses its advertised `user_agent`: an on-Pi comparison returned
+HTTP 403 with Python's default User-Agent and HTTP 200 with the provider's
+User-Agent. This explains the first bypass mode's local HTTP 502, not the
+phone's Apple HTTP 503. Upstream HTTP status codes are logged without response
+bodies or identity data.
 The provider itself can still return equal OTPs; equality alone is not a failure.
 This mode does not log in to an Apple account or change the phone's User-Agent.
 

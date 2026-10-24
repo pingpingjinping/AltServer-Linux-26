@@ -1,5 +1,6 @@
 """Offline checks for isolated identity preservation and cache bypass."""
 import base64
+import contextlib
 import hashlib
 import importlib.util
 import io
@@ -45,6 +46,7 @@ class FreshHeadersTests(unittest.TestCase):
         for call in send.call_args_list:
             request = call.args[0]
             self.assertEqual(request.get_method(), 'POST')
+            self.assertEqual(request.get_header('User-agent'), self.identity['user_agent'])
             self.assertEqual(json.loads(request.data), {
                 'identifier': base64.b64encode(self.identifier).decode(),
                 'adi_pb': base64.b64encode(self.adi).decode()})
@@ -96,6 +98,17 @@ class FreshHeadersTests(unittest.TestCase):
                         urlopen('http://127.0.0.1:' + str(server.server_port))
                     self.assertEqual(caught.exception.code, 502)
                     self.assertNotIn(b'private-error', caught.exception.read())
+                output = io.StringIO()
+                upstream = HTTPError('https://provider.test/v3/get_headers', 403,
+                                     'private-error', {}, io.BytesIO(b'private-body'))
+                with patch.object(b, 'fetch_fresh_anisette', side_effect=upstream), contextlib.redirect_stdout(output):
+                    with self.assertRaises(HTTPError) as caught:
+                        urlopen('http://127.0.0.1:' + str(server.server_port))
+                    self.assertEqual(caught.exception.code, 502)
+                    self.assertNotIn(b'private', caught.exception.read())
+                self.assertIn('upstream HTTP 403', output.getvalue())
+                self.assertNotIn('private', output.getvalue())
+                self.assertNotIn('provider.test', output.getvalue())
                 cached.assert_not_called()
         finally:
             server.shutdown()

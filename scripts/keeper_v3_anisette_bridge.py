@@ -17,6 +17,7 @@ import socket
 import struct
 import threading
 import uuid
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -121,7 +122,12 @@ def fetch_fresh_anisette(state_path, headers_url, identity):
     request = Request(headers_url, data=json.dumps({
         'identifier': base64.b64encode(identifier).decode('ascii'),
         'adi_pb': base64.b64encode(adi_pb).decode('ascii'),
-    }).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    }).encode(), headers={
+        'Content-Type': 'application/json',
+        # This provider rejects Python's default UA with HTTP 403. Use its
+        # advertised public UA for the provider request, as for provisioning.
+        'User-Agent': identity['user_agent'],
+    }, method='POST')
     # Call the same provider with the same identity on every request. Bypass only
     # Keeper's RPC cache; the remote provider can still choose to reuse an OTP.
     with urlopen(request, timeout=90) as response:
@@ -162,6 +168,12 @@ class Handler(BaseHTTPRequestHandler):
             identity = getattr(self.server, 'provider_identity', None)
             if identity:
                 data['X-MMe-Client-Info'] = identity['client_info']
+        except HTTPError as exc:
+            # Status codes are safe diagnostics; never log the body or request.
+            print('Anisette backend request failed: HTTPError (upstream HTTP '
+                  + str(exc.code) + ')', flush=True)
+            exc.close()
+            return self.respond(502, {'error': 'Anisette backend request failed'})
         except Exception as exc:
             # Do not print exceptions or response objects containing backend data.
             print('Anisette backend request failed: ' + type(exc).__name__, flush=True)
