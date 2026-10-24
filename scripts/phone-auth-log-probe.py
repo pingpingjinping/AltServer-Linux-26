@@ -32,10 +32,12 @@ def probe(lib, udid, seconds, clock=time.monotonic):
     received_bytes = matching_lines = 0
     pending = b''
     try:
+        print('Connecting directly to phone...', flush=True)
         result = lib.idevice_new_with_options(c.byref(device), udid.encode(), 2)
         print('Device connection result: ' + str(result), flush=True)
         if result != 0:
             return 1
+        print('Starting phone syslog service...', flush=True)
         result = lib.syslog_relay_client_start_service(
             device, c.byref(client), b'AltStoreLogProbe')
         print('Syslog service result: ' + str(result), flush=True)
