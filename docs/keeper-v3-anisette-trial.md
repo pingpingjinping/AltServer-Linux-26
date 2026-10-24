@@ -152,3 +152,37 @@ phone logs may contain identifiers. Syslog availability and useful authenticatio
 details are not guaranteed on a given iOS release. Offline tests cover direct
 connection, fragmented lines, filtering, service/receive failures and cleanup:
 `python3 -m unittest discover -s tests -p 'test_phone_auth_log_probe.py'`.
+# Keep the working fresh-header trial across reboots
+
+After a real on-phone refresh has succeeded in `fresh-headers` mode, run:
+
+```sh
+sudo python3 scripts/keeper-v3-persist.py apply
+```
+
+This verifies the existing binary checksum and isolated provisioned state, copies
+the binary, adapter, and private state to `/opt/altserver-keeper-v3`, and enables
+`altserver.service` plus `anisette-keeper-v3.service` for boot. The latter replaces
+the transient bridge on the same loopback port, 16971. It fetches headers directly
+from the same provider; no backend container is needed in this mode. The original
+Keeper, account, pairing data, Docker containers, and base AltServer unit are not
+modified. No build, Apple login, or phone operation is performed. A persistent
+drop-in overrides the existing runtime trial drop-in and retains TCP netmuxd.
+
+The new adapter retries startup if network/provider metadata is temporarily
+unavailable. Data-generation checks do **not** verify that intermittent phone-side
+Apple HTTP 503 is fixed. Keep automatic app renewal disabled for the separate
+Keeper expiry experiment.
+
+```sh
+sudo python3 scripts/keeper-v3-persist.py status
+sudo python3 scripts/keeper-v3-persist.py rollback
+```
+
+Promotion failures restore the working trial, including a transient unit that
+systemd has already collected. A manual rollback in the same boot does the same;
+after a reboot it restores the original boot enable state (disabled on WalnutPi).
+Backups and isolated state remain under `/opt/altserver-keeper-v3/backup` and the
+deployment directory. Rollback refuses to delete unit files subsequently edited
+by an operator. Existing trial scripts refuse mutations while this persistent
+deployment is active; use its rollback command first.

@@ -14,6 +14,9 @@ CLIENT_INFO='<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd
 USER_AGENT='AuthKit/1 (Macintosh; OS X 26.5.2) (com.apple.dt.Xcode/26.0)'
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+if [[ -f /opt/altserver-keeper-v3/APPLIED && ${1:-} != status ]]; then
+    die 'Persistent deployment is active. Use sudo python3 scripts/keeper-v3-persist.py rollback first.'
+fi
 [[ $WORK = /* && $WORK != *[[:space:]]* ]] || die 'Trial directory must be an absolute path without whitespace.'
 [[ $(uname -m) = aarch64 ]] || die 'This trial requires the ARM64 Pi.'
 

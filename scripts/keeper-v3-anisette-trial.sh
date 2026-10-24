@@ -14,6 +14,9 @@ IMAGE=ghcr.io/pingpingjinping/altkeeper:latest
 URL=https://ani3.stikstore.app
 USER_AGENT='AuthKit/1 (Macintosh; OS X 26.5.2) (com.apple.dt.Xcode/26.0)'
 die() { echo "ERROR: $*" >&2; exit 1; }
+if [[ -f /opt/altserver-keeper-v3/APPLIED && ${1:-} != status ]]; then
+    die 'Persistent deployment is active. Use sudo python3 scripts/keeper-v3-persist.py rollback first.'
+fi
 [[ $WORK = /* && $WORK != *[[:space:]]* ]] || die 'Use an absolute trial path without whitespace.'
 
 rollback() {
