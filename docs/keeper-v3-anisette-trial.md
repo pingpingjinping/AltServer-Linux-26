@@ -132,3 +132,23 @@ The adapter never logs raw response values. Upstream backend logs can contain
 identifiers; review those locally before sharing. Reboot removes the temporary
 service override and adapter service, and the new container has no restart
 policy. The main trial's original caveats still apply.
+
+## Phone log probe without HTTPS interception
+
+`idevicesyslog` waits for a device attachment event before starting its logging
+service. netmuxd v0.1.4's `Listen` command is a stub, so a reachable phone can
+still produce no output from that tool. This is a diagnostic-transport issue,
+not evidence about Apple's HTTP 503.
+
+`scripts/phone-auth-log-probe.py --udid YOUR_UDID` connects directly through
+localhost:27015, starts the existing syslog relay service, and reads for 60
+seconds. It uses the installed libimobiledevice shared library and does not
+subscribe to device events. It prints connection/error codes, whether any
+system log bytes arrived, and lines containing AltStore. No proxy, certificate
+change, service reconfiguration or Apple ID login is performed by the probe.
+
+Run one phone operation during capture. Review output locally before sharing:
+phone logs may contain identifiers. Syslog availability and useful authentication
+details are not guaranteed on a given iOS release. Offline tests cover direct
+connection, fragmented lines, filtering, service/receive failures and cleanup:
+`python3 -m unittest discover -s tests -p 'test_phone_auth_log_probe.py'`.
