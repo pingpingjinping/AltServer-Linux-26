@@ -139,8 +139,9 @@ finally:
     p.unlink(missing_ok=True)
 PY
     sudo install -d -m 755 "$(dirname "$DROPIN")"
-    printf '[Service]\nExecStart=\nExecStart=%s/AltServer/build/AltServer-aarch64\nEnvironment="ALTSERVER_ANISETTE_SERVER=http://127.0.0.1:%s"\nEnvironment="ALTSERVER_GSA_USER_AGENT=%s"\n' \
-        "$WORK" "$PORT" "$USER_AGENT" | sudo tee "$DROPIN" >/dev/null
+    # ExecStart's env assignments take precedence even over an old EnvironmentFile.
+    printf '[Service]\nExecStart=\nExecStart=/usr/bin/env "ALTSERVER_ANISETTE_SERVER=http://127.0.0.1:%s" "ALTSERVER_GSA_USER_AGENT=%s" "%s/AltServer/build/AltServer-aarch64"\n' \
+        "$PORT" "$USER_AGENT" "$WORK" | sudo tee "$DROPIN" >/dev/null
     sudo systemctl daemon-reload
     sudo systemctl restart altserver.service
     sleep 2

@@ -24,6 +24,7 @@ jobs:
         run: |
           file build/AltServer-aarch64
           timeout 15 build/AltServer-aarch64 -h
+          timeout 15 build/AltServer-aarch64 --help
           sha256sum build/AltServer-aarch64 > build/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:

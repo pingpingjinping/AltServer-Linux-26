@@ -98,6 +98,7 @@ int main(int argc, char *argv[]) {
           //{"ipaddr",	required_argument,		0, 'i'},
 		  //{"pairData",	required_argument,      0, 'P'},
 		  {"debug",		no_argument,      		0, 'd'},
+          {"help",       no_argument,            0, 'h'},
           {0, 0, 0, 0}
         };
 	
@@ -114,7 +115,7 @@ int main(int argc, char *argv[]) {
 		int this_option_optind = optind ? optind : 1;
 		int option_index = 0;
 
-		int c = getopt_long (argc, argv, "u:i:a:p:P:d",
+		int c = getopt_long (argc, argv, "u:i:a:p:P:dh",
 						long_options, &option_index);
 		if (c == -1) break;
 

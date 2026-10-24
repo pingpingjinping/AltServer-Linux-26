@@ -48,6 +48,9 @@ checks its identity, required OTP fields and clock. It leaves the old Anisette
 container, images, source trees and state unchanged. The AltServer executable
 is selected through a temporary `/run/systemd/system` drop-in. It does not
 overwrite the original executable or enable any service or timer.
+The trial's explicit process environment overrides any old EnvironmentFile.
+The advertised `-h` / `--help` options are also registered correctly so smoke
+checks can distinguish a running binary from an argument-parsing failure.
 
 AltKeeper's files, `/srv/altkeeper`, containers and manual-only renewal setup
 are never modified. If something listens on Keeper's AltServer port 49500, the
