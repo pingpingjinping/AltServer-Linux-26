@@ -26,6 +26,7 @@ extern "C" {
 }
 
 #include <ostream>
+#include <cstdlib>
 
 using namespace std;
 using namespace utility;                    // Common utilities like string conversions
@@ -42,6 +43,14 @@ extern std::string WideStringFromString(std::string string);
 extern bool decompress(const uint8_t* input, size_t input_size, std::vector<uint8_t>& output);
 
 #define odslog(msg) { std::stringstream ss; ss << msg << std::endl; OutputDebugStringA(ss.str().c_str()); }
+
+static std::string ALTAuthKitUserAgent()
+{
+    const char* configured = std::getenv("ALTSERVER_GSA_USER_AGENT");
+    return configured && *configured
+        ? configured
+        : "AuthKit/1 (Macintosh; OS X 26.5.2) (com.apple.dt.Xcode/26.0)";
+}
 
 //struct ccrng_state* ccDRBGGetRngState(void);
 
@@ -201,7 +210,7 @@ static void ALTLogRequestHeaders(
     {
         odslog(StringFromWideString(h.first)
                << ": "
-               << StringFromWideString(h.second));
+               << "[redacted]");
     }
 
     odslog("=== END " << label << " REQUEST ===");
@@ -1246,9 +1255,9 @@ pplx::task<bool> AppleAPI::RequestTwoFactorCode(
         {U("Accept"), U("application/x-buddyml")},
         {U("Accept-Language"), U("en-us")},
         {U("Content-Type"), U("application/x-plist")},
-        {U("User-Agent"), U("Xcode")},
+        {U("User-Agent"), WideStringFromString(ALTAuthKitUserAgent())},
         {U("X-Apple-App-Info"), U("com.apple.gs.xcode.auth")},
-        {U("X-Xcode-Version"), U("26.0 (17A324)")},
+        {U("X-Xcode-Version"), U("27.0 (27A5218g)")},
 
         {U("X-Apple-Identity-Token"), encodedIdentityToken},
         {U("X-Apple-I-MD"),
@@ -1814,14 +1823,13 @@ pplx::task<plist_t> AppleAPI::SendAuthenticationRequest(std::map<std::string, pl
 	char* plistXML = nullptr;
 	uint32_t length = 0;
 	plist_to_xml(plist, &plistXML, &length);
-   //HR modification
+   // Match AltKeeper's modern AuthKit transport identity. The Anisette server
+   // supplies X-MMe-Client-Info; do not replace its provisioned device identity.
 	std::map<utility::string_t, utility::string_t> headers = {
         {U("Content-Type"), U("text/x-xml-plist")},
         {U("X-MMe-Client-Info"), WideStringFromString(anisetteData->deviceDescription())},
-        {U("Accept"), U("*/*")},
-        //{U("User-Agent"), U("akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0")},
-        //{U("User-Agent"), U("akd/1.0 CFNetwork/808.1.4")},
-        {U("User-Agent"), U("AuthKit/1 (Macintosh; OS X 26.5.2) (com.apple.dt.Xcode/26.0)")},
+        {U("Accept"), U("text/x-xml-plist")},
+        {U("User-Agent"), WideStringFromString(ALTAuthKitUserAgent())},
         {U("X-Xcode-Version"), U("27.0 (27A5218g)")},
         {U("X-Apple-App-Info"), U("com.apple.gs.xcode.auth")},
         {U("Connection"), U("close")}
