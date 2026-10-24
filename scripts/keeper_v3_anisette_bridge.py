@@ -5,11 +5,18 @@ This sends only AnisetteDataRequest; it has no account, signing or phone APIs.
 The backend's state belongs to a separate, disposable container.
 """
 import argparse
+import base64
 import datetime as dt
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
+import pathlib
+import plistlib
 import socket
 import struct
+import threading
+import uuid
 from urllib.request import Request, urlopen
 
 
@@ -92,6 +99,50 @@ def fetch_anisette(port):
     return convert_response(response)
 
 
+def read_fresh_state(path):
+    # A private snapshot of the isolated trial's state, never the insurance state.
+    with pathlib.Path(path).open('rb') as stream:
+        raw = stream.read(4 * 1024 * 1024 + 1)
+    if len(raw) > 4 * 1024 * 1024:
+        raise ValueError('Anisette state is too large')
+    state = plistlib.loads(raw)
+    identifier, adi_pb = state.get('keychain_identifier'), state.get('adi_pb')
+    if not isinstance(identifier, bytes) or len(identifier) != 16:
+        raise ValueError('Invalid Anisette state identifier')
+    if not isinstance(adi_pb, bytes) or not adi_pb:
+        raise ValueError('Anisette state is not provisioned')
+    return identifier, adi_pb
+
+
+def fetch_fresh_anisette(state_path, headers_url, identity):
+    if not headers_url.startswith('https://'):
+        raise ValueError('Anisette headers require HTTPS')
+    identifier, adi_pb = read_fresh_state(state_path)
+    request = Request(headers_url, data=json.dumps({
+        'identifier': base64.b64encode(identifier).decode('ascii'),
+        'adi_pb': base64.b64encode(adi_pb).decode('ascii'),
+    }).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    # Call the same provider with the same identity on every request. Bypass only
+    # Keeper's RPC cache; the remote provider can still choose to reuse an OTP.
+    with urlopen(request, timeout=90) as response:
+        raw = response.read(65537)
+    if len(raw) > 65536:
+        raise ValueError('Anisette headers response is too large')
+    headers = json.loads(raw)
+    response = {'identifier': 'AnisetteDataResponse', 'anisetteData': {
+        'machineID': headers.get('X-Apple-I-MD-M'),
+        'oneTimePassword': headers.get('X-Apple-I-MD'),
+        'routingInfo': headers.get('X-Apple-I-MD-RINFO'),
+        'localUserID': hashlib.sha256(identifier).hexdigest(),
+        'deviceUniqueIdentifier': str(uuid.UUID(bytes=identifier)),
+        'deviceSerialNumber': '2',
+        'deviceDescription': identity['client_info'],
+        'date': dt.datetime.now(dt.timezone.utc).isoformat(),
+        'locale': 'en_US', 'timeZone': 'GMT',
+    }}
+    return convert_response(response)
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/healthz':
@@ -99,7 +150,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != '/':
             return self.respond(404, {'error': 'Not found'})
         try:
-            data = fetch_anisette(self.server.backend_port)
+            state_path = getattr(self.server, 'fresh_state_file', None)
+            if state_path:
+                with self.server.fresh_lock:
+                    data = fetch_fresh_anisette(
+                        state_path, self.server.headers_url, self.server.provider_identity)
+            else:
+                data = fetch_anisette(self.server.backend_port)
             # Keeper's fork hardcodes its own client description. The actual
             # provider can advertise a different identity; forward that identity.
             identity = getattr(self.server, 'provider_identity', None)
@@ -130,8 +187,11 @@ def main():
     parser.add_argument('--port', type=int, default=16971)
     parser.add_argument('--backend-port', type=int, default=14951)
     parser.add_argument('--client-info-url', default='https://ani3.stikstore.app/v3/client_info')
+    parser.add_argument('--fresh-state-file', default=os.environ.get('ALTSERVER_ANISETTE_FRESH_STATE'))
     args = parser.parse_args()
     identity = fetch_provider_identity(args.client_info_url)
+    if args.fresh_state_file:
+        read_fresh_state(args.fresh_state_file)
     # These are public provider metadata, never OTPs or account information.
     print('Provider client_info: ' + identity['client_info'], flush=True)
     print('Provider user_agent: ' + identity['user_agent'], flush=True)
@@ -139,6 +199,11 @@ def main():
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.backend_port = args.backend_port
     server.provider_identity = identity
+    server.fresh_state_file = args.fresh_state_file
+    server.fresh_lock = threading.Lock()
+    server.headers_url = args.client_info_url.rsplit('/', 1)[0] + '/get_headers'
+    print('Header mode: ' + ('direct provider (Keeper cache bypassed)' if args.fresh_state_file
+                             else 'Keeper RPC (backend cache applies)'), flush=True)
     print('Anisette bridge listening on localhost (no account or phone access)', flush=True)
     server.serve_forever()
 

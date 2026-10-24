@@ -49,6 +49,49 @@ The image is not pulled or built. The local Keeper image must already exist.
 This isolates data generation for comparison; it is not a confirmed 503 fix
 and it is not a test of the C++ signing/installation path.
 
+## Compare with Keeper's 20-second cache bypassed
+
+The Pi trial installed four LiveContainer profiles created on 24 October 2026
+at 17:31 KST, expiring on 31 October at 17:31 KST; the app opened successfully.
+Other attempts returned HTTP 503. Local probes confirmed that requests three
+seconds apart reused the same OTP and timestamp, while a request about 27
+seconds later returned different values. This establishes the cache behavior,
+not that the cache causes Apple's rejection.
+
+For a controlled comparison, update the Python adapter and this helper, then:
+
+```bash
+bash ~/altserver-keeper-auth-src/scripts/keeper-v3-anisette-trial.sh fresh-headers
+```
+
+This copies only the **isolated trial's** `state/anisette_state` to a private,
+user-readable snapshot. A temporary environment drop-in changes only the
+adapter. Each incoming request now POSTs to the same provider's `v3/get_headers`
+using the same keychain identifier and adi.pb; UUID and local-user ID are derived
+as in Keeper. The client description, serial number, locale and timezone stay
+the same as the existing bridge. The original trial state is not modified.
+Calls are serialized and there is no automatic fallback to cached RPC data.
+The provider itself can still return equal OTPs; equality alone is not a failure.
+This mode does not log in to an Apple account or change the phone's User-Agent.
+
+The adapter is restarted and a real header generation request is checked. If
+that check fails, the helper attempts to restore the previous mode. No image or
+AltServer binary rebuild is needed. A malformed/retired identity fails closed;
+this mode intentionally does not re-provision an identity, since doing so would
+confound the comparison.
+
+Restore the cached baseline without reverting the whole v3 experiment:
+
+```bash
+bash ~/altserver-keeper-auth-src/scripts/keeper-v3-anisette-trial.sh cached-headers
+```
+
+Run one phone refresh with ProxyPin disabled and record its result. A single
+success does not prove a fix because the cached baseline already succeeded.
+If HTTP 503 still occurs, cache bypass is not a complete fix; investigate the
+phone's actual GrandSlam request and identity independently. Offline checks:
+`python3 -m unittest discover -s tests -p 'test_fresh_anisette_bridge.py'`.
+
 After updating the three scripts, run:
 
 ```bash

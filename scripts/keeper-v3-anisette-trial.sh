@@ -6,6 +6,8 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 WORK=${ALTSERVER_TRIAL_DIR:-$HOME/altserver-keeper-auth-20261024}
 NAME=anisette-keeper-v3-backend
 UNIT=anisette-keeper-v3-bridge.service
+FRESH_DROPIN=/run/systemd/system/anisette-keeper-v3-bridge.service.d/90-fresh-headers.conf
+FRESH_STATE=$WORK/v3-fresh-state.plist
 DROPIN=/run/systemd/system/altserver.service.d/90-keeper-auth-trial.conf
 MARKER=$WORK/V3_BRIDGE_APPLIED
 IMAGE=ghcr.io/pingpingjinping/altkeeper:latest
@@ -20,6 +22,9 @@ rollback() {
     sudo install -m 644 "$WORK/v3-previous-dropin" "$DROPIN"
     sudo systemctl daemon-reload
     sudo systemctl stop "$UNIT" || true
+    sudo rm -f "$FRESH_DROPIN"
+    rm -f "$FRESH_STATE"
+    sudo systemctl daemon-reload
     sudo systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
     if sudo docker container inspect "$NAME" >/dev/null 2>&1; then
         sudo docker rm -f "$NAME" >/dev/null
@@ -125,10 +130,71 @@ PY
     echo 'Provider identity refreshed; the phone authentication result remains unverified.'
 }
 
+check_bridge() {
+    sudo systemctl daemon-reload || return 1
+    sudo systemctl restart "$UNIT" || return 1
+    local ready=0
+    for _ in {1..25}; do
+        if curl -fsS --max-time 2 http://127.0.0.1:16971/healthz >/dev/null 2>&1; then
+            ready=1; break
+        fi
+        sleep 1
+    done
+    [[ $ready = 1 ]] || return 1
+    curl -fsS --max-time 100 http://127.0.0.1:16971/ -o /dev/null
+}
+
+header_mode() {
+    [[ -f $MARKER ]] || die 'The v3 trial is not active; run apply first.'
+    local desired=$1 previous=cached
+    [[ ! -f $FRESH_DROPIN ]] || previous=fresh
+    [[ $desired != "$previous" ]] || { echo "Header mode is already $desired."; return; }
+    if [[ $desired = fresh ]]; then
+        # Copy only the isolated trial identity. The root-owned source is unchanged.
+        sudo install -m 600 -o "$(id -u)" -g "$(id -g)" \
+            "$WORK/keeper-v3-only-state/state/anisette_state" "$FRESH_STATE"
+        python3 - "$ROOT/scripts/keeper_v3_anisette_bridge.py" "$FRESH_STATE" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('bridge', sys.argv[1])
+bridge = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bridge)
+try:
+    bridge.read_fresh_state(sys.argv[2])
+except Exception:
+    sys.exit('The isolated trial state could not be validated (values redacted).')
+PY
+        sudo install -d -m 755 "$(dirname -- "$FRESH_DROPIN")"
+        printf '[Service]\nEnvironment="ALTSERVER_ANISETTE_FRESH_STATE=%s"\n' "$FRESH_STATE" | \
+            sudo tee "$FRESH_DROPIN" >/dev/null
+    else
+        sudo rm -f "$FRESH_DROPIN"
+    fi
+    if check_bridge; then
+        if [[ $desired = cached ]]; then rm -f "$FRESH_STATE"; fi
+        echo "Header mode switched to $desired; data generation check passed."
+        echo 'No Apple ID login was attempted; phone refresh and HTTP 503 remain unverified.'
+        return
+    fi
+    echo 'Header-mode check failed; restoring the previous header mode.' >&2
+    if [[ $previous = fresh ]]; then
+        printf '[Service]\nEnvironment="ALTSERVER_ANISETTE_FRESH_STATE=%s"\n' "$FRESH_STATE" | \
+            sudo tee "$FRESH_DROPIN" >/dev/null
+    else
+        sudo rm -f "$FRESH_DROPIN"
+    fi
+    if ! check_bridge; then
+        echo 'ERROR: The previous header mode also failed its check; inspect the trial bridge logs.' >&2
+    fi
+    if [[ $previous = cached ]]; then rm -f "$FRESH_STATE"; fi
+    return 1
+}
+
 case ${1:-} in
     apply) apply_trial ;;
     refresh-identity) refresh_identity ;;
+    fresh-headers) header_mode fresh ;;
+    cached-headers) header_mode cached ;;
     rollback) rollback ;;
     status) sudo systemctl --no-pager status "$UNIT" || true; sudo docker ps -a --filter "name=^/$NAME$" ;;
-    *) echo "Usage: bash $0 apply|refresh-identity|status|rollback"; exit 2 ;;
+    *) echo "Usage: bash $0 apply|refresh-identity|fresh-headers|cached-headers|status|rollback"; exit 2 ;;
 esac
