@@ -1,0 +1,34 @@
+name: Keeper auth ARM64 check
+on:
+  push:
+    branches: [codex/keeper-auth-20261024]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build with the existing ARM64 builder
+        run: |
+          mkdir -p build
+          docker run --rm -v "$PWD:/workdir" -w /workdir/build \
+            ghcr.io/nyamisty/altserver_builder_alpine_aarch64 \
+            bash -c 'make -f ../Makefile -j2'
+          sudo chown -R "$(id -u):$(id -g)" build
+      - name: Check executable
+        run: |
+          file build/AltServer-aarch64
+          timeout 15 build/AltServer-aarch64 -h
+          sha256sum build/AltServer-aarch64 > build/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: altserver-keeper-auth-arm64
+          path: |
+            build/AltServer-aarch64
+            build/SHA256SUMS
+          retention-days: 14

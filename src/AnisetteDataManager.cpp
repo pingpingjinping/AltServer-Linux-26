@@ -7,6 +7,7 @@
 #include <set>
 #include <ctime>
 #include <cstdlib>
+#include <stdexcept>
 
 #include "AnisetteData.h"
 #include "AltServerApp.h"
@@ -95,13 +96,17 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 		.then([=](http_response response)
 			{
 				odslog("Received response status code: " << response.status_code());
+				if (response.status_code() != status_codes::OK)
+				{
+					throw std::runtime_error("Anisette server returned HTTP " + std::to_string(response.status_code()));
+				}
 				return response.extract_json();
 			})
 		.then([&anisetteData](pplx::task<json::value> previousTask)
 			{
 				odslog("parse anisette data ret");
 				json::value jsonVal = previousTask.get();
-				odslog("Got anisetteData json: " << jsonVal);
+				odslog("Anisette data received (values redacted)");
 				std::vector<std::string> keys = {
 					"X-Apple-I-MD-M",
 					"X-Apple-I-MD",
@@ -115,11 +120,19 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 					"X-Apple-I-TimeZone"
 				};
 				for (auto &key : keys) {
-					odslog(key << ": " << jsonVal.at(key).as_string().c_str());
+					if (!jsonVal.has_string_field(key) || jsonVal.at(key).as_string().empty())
+					{
+						throw std::runtime_error("Anisette response missing string field: " + key);
+					}
 				}
 
 				struct tm tm = { 0 };
-				strptime(jsonVal.at("X-Apple-I-Client-Time").as_string().c_str(), "%Y-%m-%dT%H:%M:%SZ", &tm);
+				const auto timestamp = jsonVal.at("X-Apple-I-Client-Time").as_string();
+				const auto end = strptime(timestamp.c_str(), "%Y-%m-%dT%H:%M:%SZ", &tm);
+				if (!end || *end != '\0')
+				{
+					throw std::runtime_error("Anisette response has an invalid UTC timestamp");
+				}
 				unsigned long ts = timegm(&tm);
 				struct timeval tv = { 0 };
 				tv.tv_sec = ts;
@@ -141,9 +154,13 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 				//IterateJSONValue();
 			});
 	
-	task.wait();
+	task.get();
 
-	odslog(*anisetteData);
+	if (!anisetteData)
+	{
+		throw std::runtime_error("Anisette response did not produce authentication data");
+	}
+	odslog("Anisette data ready (values redacted)");
 
 	return anisetteData;
 }
