@@ -11,8 +11,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Initialize the Linux library submodules
+        run: git submodule update --init --recursive -- libraries/
       - name: Build with the existing ARM64 builder
         run: |
           mkdir -p build
