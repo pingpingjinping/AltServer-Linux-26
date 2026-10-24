@@ -10,6 +10,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import socket
 import struct
+from urllib.request import Request, urlopen
+
+
+def fetch_provider_identity(url):
+    if not url.startswith('https://'):
+        raise ValueError('Provider metadata requires HTTPS')
+    request = Request(url, headers={'User-Agent': 'AltServer-Anisette-Bridge/1.0'})
+    with urlopen(request, timeout=15) as response:
+        payload = response.read(65537)
+    if len(payload) > 65536:
+        raise ValueError('Provider metadata is too large')
+    data = json.loads(payload)
+    for field in ('client_info', 'user_agent'):
+        value = data.get(field)
+        if not isinstance(value, str) or not value or '\n' in value or '\r' in value:
+            raise ValueError('Invalid provider identity metadata')
+    return {k: data[k] for k in ('client_info', 'user_agent')}
 
 FIELDS = {
     'machineID': 'X-Apple-I-MD-M',
@@ -83,6 +100,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(404, {'error': 'Not found'})
         try:
             data = fetch_anisette(self.server.backend_port)
+            # Keeper's fork hardcodes its own client description. The actual
+            # provider can advertise a different identity; forward that identity.
+            identity = getattr(self.server, 'provider_identity', None)
+            if identity:
+                data['X-MMe-Client-Info'] = identity['client_info']
         except Exception as exc:
             # Do not print exceptions or response objects containing backend data.
             print('Anisette backend request failed: ' + type(exc).__name__, flush=True)
@@ -107,9 +129,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=16971)
     parser.add_argument('--backend-port', type=int, default=14951)
+    parser.add_argument('--client-info-url', default='https://ani3.stikstore.app/v3/client_info')
     args = parser.parse_args()
+    identity = fetch_provider_identity(args.client_info_url)
+    # These are public provider metadata, never OTPs or account information.
+    print('Provider client_info: ' + identity['client_info'], flush=True)
+    print('Provider user_agent: ' + identity['user_agent'], flush=True)
+    print('The phone still chooses its own authentication User-Agent.', flush=True)
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.backend_port = args.backend_port
+    server.provider_identity = identity
     print('Anisette bridge listening on localhost (no account or phone access)', flush=True)
     server.serve_forever()
 

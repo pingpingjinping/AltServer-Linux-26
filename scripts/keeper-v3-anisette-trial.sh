@@ -60,7 +60,7 @@ apply_trial() {
     sudo systemd-run --unit="$UNIT" --property="User=$(id -un)" \
         --property="Group=$(id -gn)" --property=NoNewPrivileges=yes \
         /usr/bin/python3 "$ROOT/scripts/keeper_v3_anisette_bridge.py" \
-        --port 16971 --backend-port 14951
+        --port 16971 --backend-port 14951 --client-info-url "$URL/v3/client_info"
     local ready=0
     for _ in {1..20}; do
         if curl -fsS --max-time 2 http://127.0.0.1:16971/healthz >/dev/null 2>&1; then
@@ -99,9 +99,36 @@ PY
     echo "Restore previous data source: bash $ROOT/scripts/keeper-v3-anisette-trial.sh rollback"
 }
 
+refresh_identity() {
+    [[ -f $MARKER ]] || die 'The v3 trial is not active; run apply first.'
+    trap 'rc=$?; trap - ERR; rollback; exit "$rc"' ERR
+    sudo systemctl restart "$UNIT"
+    local ready=0
+    for _ in {1..25}; do
+        if curl -fsS --max-time 2 http://127.0.0.1:16971/healthz >/dev/null 2>&1; then
+            ready=1; break
+        fi
+        sleep 1
+    done
+    [[ $ready = 1 ]]
+    curl -fsS --max-time 100 http://127.0.0.1:16971/ -o "$WORK/v3-identity-check.json"
+    python3 - "$WORK/v3-identity-check.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+try:
+    data = json.loads(p.read_text())
+    print('Forwarded client_info: ' + data['X-MMe-Client-Info'])
+finally:
+    p.unlink(missing_ok=True)
+PY
+    trap - ERR
+    echo 'Provider identity refreshed; the phone authentication result remains unverified.'
+}
+
 case ${1:-} in
     apply) apply_trial ;;
+    refresh-identity) refresh_identity ;;
     rollback) rollback ;;
     status) sudo systemctl --no-pager status "$UNIT" || true; sudo docker ps -a --filter "name=^/$NAME$" ;;
-    *) echo "Usage: bash $0 apply|status|rollback"; exit 2 ;;
+    *) echo "Usage: bash $0 apply|refresh-identity|status|rollback"; exit 2 ;;
 esac

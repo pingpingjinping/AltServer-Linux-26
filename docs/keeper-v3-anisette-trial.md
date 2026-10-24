@@ -28,6 +28,23 @@ also binds exclusively to 127.0.0.1. Only the new backend provisions its own
 Anisette identity using the configured remote server; no Apple ID login is
 requested by this setup script.
 
+The adapter reads `client_info` from the same provider's `/v3/client_info`
+endpoint at startup, rather than forwarding the Mac15,7 description hardcoded
+in the Keeper fork. The provider's public `user_agent` is reported for diagnosis
+but cannot be injected into the phone's authentication transport through the
+v1 Anisette RPC response. AltSign's default phone User-Agent and Keeper's own
+User-Agent can therefore still differ. Matching the description is not proof
+of a successful Apple login.
+
+To update an already-running trial after updating the Python and shell scripts:
+
+```bash
+bash ~/altserver-keeper-auth-src/scripts/keeper-v3-anisette-trial.sh refresh-identity
+```
+
+This restarts only the adapter and checks a response. A failure attempts to
+restore the previous pre-v3 data source. It requires no binary or image rebuild.
+
 The image is not pulled or built. The local Keeper image must already exist.
 This isolates data generation for comparison; it is not a confirmed 503 fix
 and it is not a test of the C++ signing/installation path.
