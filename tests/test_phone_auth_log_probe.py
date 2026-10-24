@@ -19,7 +19,9 @@ class FakeLibrary:
         self.chunks = [b'OtherProcess: ignored\nAltSto', b're: auth 503\nAltStore: received\0']
 
     def idevice_new_with_options(self, target, udid, options):
-        assert options == 2 and udid == b'test-device'
+        # External ABI contract from libimobiledevice.h, not the probe constant:
+        # 2 selects USBMUX; 4 selects the network-only path used by this test.
+        assert options == 4 and udid == b'test-device'
         c.cast(target, c.POINTER(c.c_void_p))[0] = 1
         return 0
 
