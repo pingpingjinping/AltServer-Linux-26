@@ -66,8 +66,11 @@ def probe(profile=None):
 
 
 class Trial:
+    kind = 'client-info'
+
     def __init__(self, root=Path('/'), runner=subprocess.run, check=probe, pause=time.sleep):
         self.root, self.runner, self.check, self.pause = root, runner, check, pause
+        self.controller_path = Path(__file__).resolve()
         self.home = self.at('/run/altserver-identity-trial')
         self.unit = self.at('/run/systemd/system/' + UNIT)
         self.dropin = self.at('/run/systemd/system/altserver.service.d/95-anisette-identity-trial.conf')
@@ -139,6 +142,12 @@ ExecStart=
 '''
         return {self.unit: unit, self.dropin: override}
 
+    def prepare(self, profile):
+        """Optional preparation before switching any AltServer configuration."""
+
+    def cleanup(self):
+        """Optional cleanup of resources owned by this trial."""
+
     def apply(self, profile):
         if any(p.exists() or p.is_symlink() for p in (self.home, self.unit, self.dropin)):
             raise RuntimeError('Trial paths already exist. Run status or rollback before another trial.')
@@ -156,9 +165,10 @@ ExecStart=
         try:
             shutil.copyfile(__file__, self.home / 'server.py')
             (self.home / 'server.py').chmod(0o644)
-            manifest = {'profile': profile, 'files': {
+            manifest = {'profile': profile, 'kind': self.kind, 'files': {
                 str(p): hashlib.sha256(s.encode()).hexdigest() for p, s in files.items()}}
             self.write(self.home / 'manifest.json', json.dumps(manifest))
+            self.prepare(profile)
             self.write(self.unit, files[self.unit])
             self.call('systemctl', 'daemon-reload')
             self.call('systemctl', 'start', UNIT)
@@ -187,9 +197,13 @@ ExecStart=
             else:
                 shutil.rmtree(self.home)
             raise
-        print('Client-Info-only trial active: ' + profile)
-        print('Provider/ADI state/provider UA unchanged. Phone refresh is still unverified.')
-        print('Temporary until reboot. Rollback: sudo python3 ' + str(Path(__file__).resolve()) + ' rollback')
+        if self.kind == 'client-info':
+            print('Client-Info-only trial active: ' + profile)
+            print('Provider/ADI state/provider UA unchanged. Phone refresh is still unverified.')
+        else:
+            print('Isolated provider trial active: ' + profile)
+            print('Fresh provider state checked. Phone refresh is still unverified.')
+        print('Temporary until reboot. Rollback: sudo python3 ' + str(self.controller_path) + ' rollback')
 
     def rollback(self):
         manifest_path = self.home / 'manifest.json'
@@ -199,6 +213,8 @@ ExecStart=
             print('No temporary identity trial is installed (or it was cleared by reboot).')
             return
         data = json.loads(manifest_path.read_text())
+        if data.get('kind', 'client-info') != self.kind:
+            raise RuntimeError('Different trial type. Use the helper that applied it to roll back.')
         if set(data['files']) != {str(self.unit), str(self.dropin)}:
             raise RuntimeError('Unexpected trial manifest paths.')
         for path, checksum in data['files'].items():
@@ -216,8 +232,9 @@ ExecStart=
         self.unit.unlink(missing_ok=True)
         self.call('systemctl', 'daemon-reload')
         self.call('systemctl', 'reset-failed', UNIT, required=False)
+        self.cleanup()
         shutil.rmtree(self.home)
-        print('Original persistent Anisette endpoint restored. Keeper and ADI state were not changed.')
+        print('Original persistent Anisette endpoint restored. Keeper and original ADI state were not changed.')
 
     def status(self):
         manifest = self.home / 'manifest.json'
