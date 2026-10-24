@@ -59,6 +59,9 @@ prepare() {
 }
 
 rollback() {
+    if [[ -f $WORK/V3_BRIDGE_APPLIED ]]; then
+        bash "$ROOT/scripts/keeper-v3-anisette-trial.sh" rollback
+    fi
     [[ -f $WORK/APPLIED ]] || { echo 'No recorded trial to roll back.'; return; }
     sudo systemctl stop altserver.service
     sudo rm -f -- "$DROPIN"
