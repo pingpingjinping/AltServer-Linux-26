@@ -17,6 +17,7 @@ URL = 'https://mac-ani.jkcoxson.com'
 BOOTSTRAP_PORT = 14952
 SOURCE_CONTAINER = 'anisette-keeper-v3-backend'
 LABEL = 'org.altserver.provider-trial'
+BOOTSTRAP_ATTEMPTS = 20
 
 
 def load_module(name, path):
@@ -65,6 +66,45 @@ class ProviderTrial(common.Trial):
         data.update(updates)
         self.write(path, json.dumps(data))
 
+    def bootstrap_status(self, cid):
+        # Never dump container logs, environment, or Docker's free-text Error:
+        # they may contain provisioning data. Only report typed lifecycle fields.
+        result = self.call('docker', 'inspect', '--type', 'container', cid,
+                           '--format', '{{json .State}}')
+        state = json.loads(result.stdout)
+        running, exit_code, oom = (state.get('Running'), state.get('ExitCode'),
+                                   state.get('OOMKilled'))
+        if type(running) is not bool or type(exit_code) is not int or type(oom) is not bool:
+            raise RuntimeError('Cannot read bootstrap lifecycle status safely.')
+        summary = f'running={running}, exit_code={exit_code}, oom_killed={oom}'
+        return running, summary
+
+    def wait_for_bootstrap(self, cid):
+        for attempt in range(BOOTSTRAP_ATTEMPTS):
+            running, summary = self.bootstrap_status(cid)
+            if not running:
+                raise RuntimeError('Bootstrap container exited: ' + summary)
+            try:
+                # Retry only transport startup failures, not a rejected or
+                # malformed provider response. Each call asks only for Anisette.
+                self.bridge.fetch_anisette(BOOTSTRAP_PORT)
+                return
+            except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError) as error:
+                running, summary = self.bootstrap_status(cid)
+                if not running or attempt == BOOTSTRAP_ATTEMPTS - 1:
+                    raise RuntimeError('Bootstrap RPC failed: ' + type(error).__name__
+                                       + '; ' + summary) from None
+                if attempt == 0:
+                    print('Bootstrap RPC not ready (' + type(error).__name__
+                          + '); retrying startup connection up to '
+                          + str(BOOTSTRAP_ATTEMPTS) + ' attempts...', flush=True)
+                self.pause(1)
+            except Exception as error:
+                _, summary = self.bootstrap_status(cid)
+                print('Bootstrap request failed: ' + type(error).__name__
+                      + '; ' + summary + ' (response and logs redacted)', flush=True)
+                raise
+
     def prepare(self, profile):
         # Reuse the image of the stopped, isolated old backend, never a moving
         # latest tag or the insurance container. No image pull/build is done.
@@ -100,15 +140,7 @@ class ProviderTrial(common.Trial):
         self.created = (cid, token)
         self.update_manifest(container_id=cid)
         self.call('docker', 'start', cid)
-        for attempt in range(20):
-            try:
-                # One AnisetteDataRequest only: no auth, signing or phone request.
-                self.bridge.fetch_anisette(BOOTSTRAP_PORT)
-                break
-            except ConnectionRefusedError:
-                if attempt == 19:
-                    raise RuntimeError('Isolated bootstrap did not start.') from None
-                self.pause(1)
+        self.wait_for_bootstrap(cid)
         source = storage / 'state/anisette_state'
         self.bridge.read_fresh_state(source)
         target = self.home / 'provider-state.plist'

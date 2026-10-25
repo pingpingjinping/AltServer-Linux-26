@@ -1,5 +1,7 @@
 """No-network checks for provisioning isolation and transactional cleanup."""
 import importlib.util
+import io
+from contextlib import redirect_stdout
 import json
 import os
 from pathlib import Path
@@ -27,6 +29,8 @@ class ProviderTests(unittest.TestCase):
         (self.root / 'run').mkdir()
         self.commands = []
         self.container_exists = False
+        self.container_state = {'Running': True, 'ExitCode': 0, 'OOMKilled': False,
+                                'Error': 'PRIVATE-ERROR-MUST-NOT-BE-PRINTED'}
         self.labels = {}
         self.create_args = None
         self.bridge = Mock()
@@ -64,7 +68,7 @@ class ProviderTests(unittest.TestCase):
             if p.SOURCE_CONTAINER in args:
                 output = IMAGE
             elif self.container_exists:
-                output = json.dumps(self.labels)
+                output = json.dumps(self.container_state if '{{json .State}}' in args else self.labels)
             else:
                 code = 1
         elif args[:2] == ['docker', 'create']:
@@ -118,6 +122,45 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn(['systemctl', 'restart', p.common.ALT], self.commands)
         removed = [cmd[-1] for cmd in self.commands if cmd[:2] == ['docker', 'rm']]
         self.assertEqual(removed, [CID])
+        self.assertEqual(self.bridge.fetch_anisette.call_count, 1)
+
+    def test_startup_reset_then_success_uses_same_empty_state_container(self):
+        attempts = iter((ConnectionResetError(), BrokenPipeError(), None))
+        def fetch(port):
+            error = next(attempts)
+            if error is not None:
+                raise error
+            return self.generate_state(port)
+        self.bridge.fetch_anisette.side_effect = fetch
+        self.apply()
+        self.assertEqual(self.bridge.fetch_anisette.call_count, 3)
+        self.assertEqual(sum(cmd[:2] == ['docker', 'create'] for cmd in self.commands), 1)
+        self.assertFalse(self.container_exists)
+        self.assertTrue(self.trial.dropin.exists())
+
+    def test_persistent_reset_stops_after_bounded_attempts_and_rolls_back(self):
+        self.bridge.fetch_anisette.side_effect = ConnectionResetError('private response')
+        with self.assertRaisesRegex(RuntimeError, 'ConnectionResetError; running=True'):
+            self.apply()
+        self.assertEqual(self.bridge.fetch_anisette.call_count, p.BOOTSTRAP_ATTEMPTS)
+        self.assertFalse(self.container_exists)
+        self.assertFalse(self.trial.home.exists())
+        self.assertNotIn(['systemctl', 'restart', p.common.ALT], self.commands)
+
+    def test_container_exit_reports_only_safe_status_and_does_not_retry(self):
+        def exited(port):
+            self.container_state.update(Running=False, ExitCode=137, OOMKilled=True)
+            raise ConnectionResetError('private response')
+        self.bridge.fetch_anisette.side_effect = exited
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(RuntimeError) as caught:
+            self.apply()
+        self.assertIn('running=False, exit_code=137, oom_killed=True', str(caught.exception))
+        self.assertNotIn('PRIVATE-ERROR', output.getvalue() + str(caught.exception))
+        self.assertNotIn('private response', output.getvalue() + str(caught.exception))
+        self.assertEqual(self.bridge.fetch_anisette.call_count, 1)
+        self.assertFalse(self.container_exists)
+        self.assertNotIn(['systemctl', 'restart', p.common.ALT], self.commands)
 
     def test_fresh_header_failure_does_not_switch_altserver(self):
         self.trial.check.side_effect = [None, RuntimeError('fresh path failed')]

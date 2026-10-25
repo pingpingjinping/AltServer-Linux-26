@@ -64,6 +64,16 @@ If setup fails, paste its short error output first. Do not delete existing
 states or rerun persistence installation. The helper may refuse unknown or
 edited trial files to avoid overwriting unrelated changes.
 
+The first Pi attempt failed with `ConnectionResetError` during bootstrap and
+restored the persistent endpoint. This does not establish a provider failure
+or explain the phone's HTTP 503. Startup now retries connection refused/reset
+and broken pipe errors at most 20 times, with a one-second pause between
+attempts, while checking that the disposable container is still running.
+Other request/validation errors are not retried. On failure, typed running,
+exit-code and OOM fields are reported before cleanup; raw container logs,
+environment and provisioning response contents are not printed. A transport
+retry can issue another Anisette request against the same new isolated state.
+
 ## Status and rollback
 
 ```sh
@@ -89,6 +99,8 @@ command to verify the temporary path; the dashboard cannot verify Apple auth.
 Offline tests cover the exclusive trial slot, provider identity forwarding,
 empty mount and pinned image selection, prepare failure cleanup, create timeout
 recovery, ownership checks, endpoint rollback and unchanged baseline state.
+They also cover startup reset recovery, bounded retry exhaustion and container
+exit diagnostics without exposing free-text errors or switching AltServer.
 Generated systemd units are syntax-checked. Real provisioning, deployed image
 compatibility and phone refresh require execution on the Pi; no claim of live
 success is made by these checks.
