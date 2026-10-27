@@ -14,6 +14,9 @@ CLIENT_INFO='<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd
 USER_AGENT='AuthKit/1 (Macintosh; OS X 26.5.2) (com.apple.dt.Xcode/26.0)'
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+if [[ -f /opt/altserver-keeper-v3/APPLIED && ${1:-} != status ]]; then
+    die 'Persistent deployment is active. Use sudo python3 scripts/keeper-v3-persist.py rollback first.'
+fi
 [[ $WORK = /* && $WORK != *[[:space:]]* ]] || die 'Trial directory must be an absolute path without whitespace.'
 [[ $(uname -m) = aarch64 ]] || die 'This trial requires the ARM64 Pi.'
 
@@ -59,6 +62,9 @@ prepare() {
 }
 
 rollback() {
+    if [[ -f $WORK/V3_BRIDGE_APPLIED ]]; then
+        bash "$ROOT/scripts/keeper-v3-anisette-trial.sh" rollback
+    fi
     [[ -f $WORK/APPLIED ]] || { echo 'No recorded trial to roll back.'; return; }
     sudo systemctl stop altserver.service
     sudo rm -f -- "$DROPIN"
@@ -95,18 +101,52 @@ apply_trial() {
     sudo docker inspect anisette > "$WORK/original-anisette.json"
     local data_target
     data_target=$(python3 - "$WORK/original-anisette.json" <<'PY'
-import json, sys
-mounts = json.load(open(sys.argv[1]))[0]['Mounts']
+import json, posixpath, sys
+container = json.load(open(sys.argv[1]))[0]
+mounts = container.get('Mounts', [])
 matches = [m['Destination'] for m in mounts if m['Destination'].rstrip('/').endswith('/anisette-v3')]
-if len(matches) != 1:
-    sys.exit('Cannot identify exactly one existing Anisette state mount; no service changes made.')
-print(matches[0])
+if len(matches) > 1:
+    sys.exit('Multiple Anisette state mounts found; no service changes made.')
+
+# A valid old container may keep its state in its writable layer, with no mounts.
+# Prefer an explicit configuration path from its actual invocation.
+args = container.get('Args', [])
+path = None
+for i, arg in enumerate(args):
+    if arg in ('-a', '--adi-path'):
+        if i + 1 >= len(args):
+            sys.exit('Missing Anisette configuration path; no service changes made.')
+        path = args[i + 1]
+    elif arg.startswith('--adi-path='):
+        path = arg.split('=', 1)[1]
+
+config = container.get('Config', {})
+environment = dict(item.split('=', 1) for item in config.get('Env', []) if '=' in item)
+home = environment.get('HOME')
+if not home and config.get('User', '').split(':', 1)[0] == 'Alcoholic':
+    home = '/home/Alcoholic'
+if path is None:
+    if matches:
+        path = matches[0]
+    elif home:
+        path = posixpath.join(home, '.config/anisette-v3')
+    else:
+        sys.exit('Cannot identify the existing Anisette state path; no service changes made.')
+if path.startswith('~/') and home:
+    path = posixpath.join(home, path[2:])
+if not path.startswith('/') or posixpath.normpath(path) == '/':
+    sys.exit('Unsafe Anisette state path; no service changes made.')
+print(posixpath.normpath(path))
 PY
     )
     [[ ! -e $WORK/anisette-data ]] || die 'Anisette trial data already exists; choose a new ALTSERVER_TRIAL_DIR.'
-    mkdir "$WORK/anisette-data"
-    sudo docker cp "anisette:$data_target/." "$WORK/anisette-data/"
-    sudo chown -R 1000:1000 "$WORK/anisette-data"
+    local snapshot
+    snapshot=$(mktemp -d "$WORK/anisette-copy.XXXXXX")
+    sudo docker cp "anisette:$data_target/." "$snapshot/" || die "Cannot copy existing state; no service changes made. Snapshot directory: $snapshot"
+    sudo chown -R 1000:1000 "$snapshot"
+    [[ -s $snapshot/device.json ]] || die "No device.json in copied state; no service changes made. Snapshot directory: $snapshot"
+    mv "$snapshot" "$WORK/anisette-data"
+    echo "Existing Anisette state copied from $data_target (contents redacted)."
     systemctl is-active altserver.service > "$WORK/previous-active" || true
     sudo systemctl cat altserver.service > "$WORK/original-altserver.service"
     touch "$WORK/APPLIED"

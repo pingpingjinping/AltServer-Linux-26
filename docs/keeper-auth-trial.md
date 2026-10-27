@@ -48,6 +48,10 @@ checks its identity, required OTP fields and clock. It leaves the old Anisette
 container, images, source trees and state unchanged. The AltServer executable
 is selected through a temporary `/run/systemd/system` drop-in. It does not
 overwrite the original executable or enable any service or timer.
+The old state can live in a mounted directory or inside the container itself.
+An explicit `--adi-path`/`-a` is preferred; otherwise the Alcoholic user's
+default configuration directory is supported. The state is copied and checked
+before any service changes. Missing or ambiguous state stops the trial.
 The trial's explicit process environment overrides any old EnvironmentFile.
 The advertised `-h` / `--help` options are also registered correctly so smoke
 checks can distinguish a running binary from an argument-parsing failure.

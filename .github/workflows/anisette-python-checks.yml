@@ -1,0 +1,23 @@
+name: Anisette adapter offline checks
+on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - 'tests/**'
+      - '.github/workflows/anisette-python-checks.yml'
+  push:
+    branches: [codex/keeper-v3-data-20261024]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run offline adapter and rollback tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Check Python and shell syntax
+        run: |
+          python3 -m py_compile scripts/*.py
+          bash -n scripts/keeper-auth-trial.sh scripts/keeper-v3-anisette-trial.sh
