@@ -64,6 +64,36 @@ Apply alone does not sign in to an Apple account or refresh an app. Test
 Classic refresh separately once apply has succeeded. The first login after
 the machine identity changes may ask for two-factor verification.
 
+### Diagnose a provisioning transport failure
+
+```sh
+sudo python3 scripts/anisette-modern-mac-trial.py diagnose
+```
+
+This performs only public provider metadata and Apple URL-bag GETs. It does
+not create a machine identity, read ADI state, change services, log in or
+install profiles. Use the same user/sudo environment as the failed apply.
+Errors show a fixed phase name and safe typed details (DNS/errno, TLS reason
+or certificate verification code, timeout, or HTTP status). Opaque exception
+messages, response bodies, URLs and private provisioning values are redacted.
+Apply also reports its actual failing phase, including Apple start/finish
+provisioning and the provider WebSocket. A successful diagnosis does not test
+those later steps; apply remains necessary to exercise them. TLS certificate
+verification remains enabled.
+
+Apple HTTPS requests use an application-local context containing the platform
+defaults plus the Apple Root CA bundled by SideInstaller v1.6.1's Rust
+GrandSlam client. Its DER SHA-256 is checked against Apple's published value
+`b0b1730ecbc7ff4505142c49f1295e6eda6bcaed7e2c68c5be91b5a11001f024`
+before loading it. This addresses missing Apple private-PKI trust on Linux
+(`verify_code=19`). The context is used only for HTTPS Apple hosts; redirects
+outside Apple are rejected. Hostname and certificate-chain verification stay
+enabled. Provider HTTP/WebSocket TLS and the system CA store remain unchanged.
+
+Root reference: [Apple's published root certificate list](https://support.apple.com/en-us/126047),
+Apple Root CA, serial 02, expires 2035-02-09. Implementation reference:
+[SideInstaller's GrandSlam client](https://github.com/FrizzleM/SideInstaller/blob/v1.6.1/rust-core/vendor/isideload/src/auth/grandslam.rs).
+
 ## Rollback
 
 ```sh

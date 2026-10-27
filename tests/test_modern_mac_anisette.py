@@ -10,11 +10,14 @@ from pathlib import Path
 import plistlib
 import struct
 import subprocess
+import socket
+import ssl
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
+from urllib.request import Request
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 
@@ -88,6 +91,45 @@ class RetryTests(unittest.TestCase):
             b.read_response(io.BytesIO(b'x' * 65537))
 
 
+class NetworkDiagnosticsTests(unittest.TestCase):
+    def test_typed_ca_dns_tls_and_timeout_details_do_not_expose_private_reasons(self):
+        cert = ssl.SSLCertVerificationError(1, 'PRIVATE certificate and request')
+        cert.verify_code = 20
+        for reason, expected in ((cert, 'verify_code=20'),
+                                 (socket.gaierror(-2, 'PRIVATE DNS'), 'DNS resolution failed'),
+                                 (ConnectionResetError(104, 'PRIVATE reset'), 'connection reset'),
+                                 (TimeoutError('PRIVATE timeout'), 'network timeout'),
+                                 ('PRIVATE arbitrary provider response', 'reason redacted'),
+                                 ('Tunnel connection failed: 403 PRIVATE', 'proxy tunnel HTTP 403')):
+            failure = URLError(reason)
+            failure.anisette_stage = 'Apple URL lookup'
+            result = b.network_error_summary(failure)
+            self.assertIn('stage=Apple URL lookup', result)
+            self.assertIn(expected, result)
+            self.assertNotIn('PRIVATE', result)
+        self.assertNotIn('PRIVATE', b.network_error_summary(error(403)))
+
+    def test_network_step_marks_the_failing_operation_without_changing_exception(self):
+        failure = URLError(socket.gaierror(-2, 'private host'))
+        with self.assertRaises(URLError) as caught:
+            b.network_operation('Apple start provisioning', Mock(side_effect=failure))
+        self.assertIs(caught.exception, failure)
+        self.assertIn('stage=Apple start provisioning', b.network_error_summary(failure))
+        failure.anisette_stage = 'PRIVATE not a fixed phase'
+        self.assertNotIn('PRIVATE', b.network_error_summary(failure))
+
+    def test_read_only_diagnose_never_creates_machine_or_calls_controller(self):
+        output = io.StringIO()
+        with patch.object(b, 'fetch_provider_identity', return_value=OLD), \
+                patch.object(b, 'apple_urlopen', return_value=io.BytesIO(plistlib.dumps({'urls': {}}))), \
+                patch.object(b, 'provision_current_mac_state') as provision, \
+                patch.object(t.ModernMacTrial, 'apply') as apply, redirect_stdout(output):
+            t.diagnose()
+        provision.assert_not_called()
+        apply.assert_not_called()
+        self.assertIn('Apple URL lookup: OK', output.getvalue())
+
+
 class ProvisionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -105,7 +147,7 @@ class ProvisionTests(unittest.TestCase):
 
     def provision(self, responses=None):
         with patch.object(b, 'ProvisioningSocket', return_value=self.ws), \
-                patch.object(b, 'urlopen', side_effect=[io.BytesIO(plistlib.dumps(x))
+                patch.object(b, 'apple_urlopen', side_effect=[io.BytesIO(plistlib.dumps(x))
                                                        for x in (responses or self.responses)]) as send:
             b.provision_current_mac_state(self.path, t.URL, CURRENT)
         return send
@@ -143,12 +185,12 @@ class ProvisionTests(unittest.TestCase):
 
     def test_existing_state_and_old_profile_are_never_reprovisioned(self):
         self.path.write_bytes(b'old-private-state')
-        with patch.object(b, 'urlopen') as send, self.assertRaises(ValueError):
+        with patch.object(b, 'apple_urlopen') as send, self.assertRaises(ValueError):
             b.provision_current_mac_state(self.path, t.URL, CURRENT)
         send.assert_not_called()
         self.assertEqual(self.path.read_bytes(), b'old-private-state')
         self.path.unlink()
-        with patch.object(b, 'urlopen') as send, self.assertRaises(ValueError):
+        with patch.object(b, 'apple_urlopen') as send, self.assertRaises(ValueError):
             b.provision_current_mac_state(self.path, t.URL, OLD)
         send.assert_not_called()
 
@@ -176,6 +218,7 @@ class ProvisionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.provision(bad)
         self.assertFalse(self.path.exists())
+
         self.ws.receive_json.side_effect = [{'result': 'GiveIdentifier'},
                                             {'result': 'GiveStartProvisioningData'}]
         bag = {'urls': {'midStartProvisioning': 'https://apple.com.attacker.test/start',
@@ -183,6 +226,56 @@ class ProvisionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.provision([bag])
         self.assertFalse(self.path.exists())
+
+    def test_provisioning_url_error_reports_lookup_stage_and_leaves_no_state(self):
+        fail = URLError(socket.gaierror(-2, 'PRIVATE lookup'))
+        with patch.object(b, 'apple_urlopen', side_effect=fail), self.assertRaises(URLError):
+            b.provision_current_mac_state(self.path, t.URL, CURRENT)
+        self.assertIn('stage=Apple URL lookup', b.network_error_summary(fail))
+        self.assertFalse(self.path.exists())
+
+
+class AppleTrustTests(unittest.TestCase):
+    def test_published_root_is_loaded_with_hostname_and_chain_checks_enabled(self):
+        baseline = ssl.create_default_context()
+        original = {hashlib.sha256(x).hexdigest() for x in baseline.get_ca_certs(binary_form=True)}
+        context = b.apple_tls_context()
+        roots = {hashlib.sha256(x).hexdigest() for x in context.get_ca_certs(binary_form=True)}
+        self.assertIn('b0b1730ecbc7ff4505142c49f1295e6eda6bcaed7e2c68c5be91b5a11001f024', roots)
+        self.assertTrue(original <= roots)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(original, {hashlib.sha256(x).hexdigest()
+                                   for x in ssl.create_default_context().get_ca_certs(binary_form=True)})
+
+    def test_mismatched_bundled_root_fails_before_a_context_is_created(self):
+        with patch.object(b, 'APPLE_ROOT_SHA256', '0' * 64), \
+                patch.object(b.ssl, 'create_default_context') as context, self.assertRaises(ValueError):
+            b.apple_tls_context()
+        context.assert_not_called()
+
+    def test_apple_opener_is_scoped_and_rejects_external_redirects(self):
+        request = Request('https://gsa.apple.com/lookup')
+        with patch.object(b, 'build_opener') as opener:
+            b.apple_urlopen(request, 20)
+            opener.return_value.open.assert_called_once_with(request, timeout=20)
+            with self.assertRaises(ValueError):
+                b.apple_urlopen(Request('https://provider.test/v3/get_headers'), 5)
+            self.assertEqual(opener.call_count, 1)
+        handler = b.AppleRedirectHandler()
+        redirected = handler.redirect_request(request, None, 302, '', {}, 'https://gsd.apple.com/lookup')
+        self.assertEqual(redirected.full_url, 'https://gsd.apple.com/lookup')
+        for destination in ('https://apple.com.attacker.test/lookup', 'http://gsa.apple.com/lookup'):
+            with self.assertRaises(ValueError):
+                handler.redirect_request(request, None, 302, '', {}, destination)
+
+    def test_provider_metadata_uses_unchanged_system_trust(self):
+        response = io.BytesIO(json.dumps(OLD).encode())
+        with patch.object(b, 'urlopen', return_value=response) as send, \
+                patch.object(b, 'apple_tls_context') as context:
+            self.assertEqual(b.fetch_provider_identity('https://provider.test/v3/client_info'), OLD)
+        context.assert_not_called()
+        self.assertNotIn('context', send.call_args.kwargs)
 
 
 class FakeSocket:

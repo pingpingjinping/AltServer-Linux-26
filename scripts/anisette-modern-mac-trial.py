@@ -9,7 +9,7 @@ import pwd
 import re
 import shutil
 import sys
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 URL = 'https://mac-ani.jkcoxson.com'
 SCRIPTS = Path(__file__).resolve().parent
@@ -37,7 +37,9 @@ class ModernMacTrial(common.Trial):
         self.check = self.probe
 
     def contents(self, profile, permanent):
-        self.identity = bridge.current_mac_identity(bridge.fetch_provider_identity(URL + '/v3/client_info'))
+        advertised = bridge.network_operation('provider metadata', bridge.fetch_provider_identity,
+                                              URL + '/v3/client_info')
+        self.identity = bridge.current_mac_identity(advertised)
         if any(char in self.identity['user_agent'] for char in ('"', '\\', '%')):
             raise ValueError('Provider User-Agent cannot be represented safely in a systemd command')
         files = super().contents(profile, permanent)
@@ -87,21 +89,45 @@ class ModernMacTrial(common.Trial):
         print('Fresh Mac identity and provider headers verified; Classic still chooses its own UA.', flush=True)
 
 
+def diagnose():
+    """Public metadata/URL-bag GETs only: no state, services or provisioning."""
+    advertised = bridge.network_operation('provider metadata', bridge.fetch_provider_identity,
+                                          URL + '/v3/client_info')
+    identity = bridge.current_mac_identity(advertised)
+    print('Provider metadata: OK', flush=True)
+    request = Request('https://gsa.apple.com/grandslam/GsService2/lookup', headers={
+        'X-Mme-Client-Info': identity['client_info'], 'User-Agent': identity['user_agent'],
+        'Content-Type': 'text/x-xml-plist', 'Accept': 'text/x-xml-plist',
+        'X-Apple-App-Info': 'com.apple.gs.xcode.auth', 'X-Xcode-Version': '14.2 (14C18)'})
+    def lookup():
+        with bridge.apple_urlopen(request, timeout=20) as response:
+            data = bridge.plistlib.loads(bridge.read_response(
+                response, 1024 * 1024, bridge.time.monotonic() + 20))
+        if not isinstance(data, dict) or not isinstance(data.get('urls'), dict):
+            raise ValueError('Invalid Apple URL bag')
+    bridge.network_operation('Apple URL lookup', lookup)
+    print('Apple URL lookup: OK', flush=True)
+    print('Read-only diagnosis finished; no identity or service was changed.', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('apply', 'status', 'rollback'))
+    parser.add_argument('action', choices=('apply', 'status', 'rollback', 'diagnose'))
     args = parser.parse_args()
-    if os.geteuid() != 0:
+    if args.action != 'diagnose' and os.geteuid() != 0:
         parser.error('Use sudo.')
     trial = ModernMacTrial()
     try:
-        if args.action == 'apply':
+        if args.action == 'diagnose':
+            diagnose()
+        elif args.action == 'apply':
             trial.apply('modern-mac')
         else:
             getattr(trial, args.action)()
     except Exception as error:
-        # Only the type: TLS/HTTP/provisioning exceptions can contain private data.
+        # Fixed phase and typed details only; opaque response text stays private.
         print('Modern Mac trial failed: ' + type(error).__name__, flush=True)
+        print(bridge.network_error_summary(error), flush=True)
         if isinstance(error, RuntimeError):
             # Controller RuntimeErrors contain only our own fixed preflight messages.
             print(str(error), flush=True)
