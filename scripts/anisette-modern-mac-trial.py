@@ -100,7 +100,7 @@ def diagnose():
         'Content-Type': 'text/x-xml-plist', 'Accept': 'text/x-xml-plist',
         'X-Apple-App-Info': 'com.apple.gs.xcode.auth', 'X-Xcode-Version': '14.2 (14C18)'})
     def lookup():
-        with urlopen(request, timeout=20) as response:
+        with bridge.apple_urlopen(request, timeout=20) as response:
             data = bridge.plistlib.loads(bridge.read_response(
                 response, 1024 * 1024, bridge.time.monotonic() + 20))
         if not isinstance(data, dict) or not isinstance(data.get('urls'), dict):

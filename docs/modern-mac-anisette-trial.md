@@ -81,6 +81,19 @@ provisioning and the provider WebSocket. A successful diagnosis does not test
 those later steps; apply remains necessary to exercise them. TLS certificate
 verification remains enabled.
 
+Apple HTTPS requests use an application-local context containing the platform
+defaults plus the Apple Root CA bundled by SideInstaller v1.6.1's Rust
+GrandSlam client. Its DER SHA-256 is checked against Apple's published value
+`b0b1730ecbc7ff4505142c49f1295e6eda6bcaed7e2c68c5be91b5a11001f024`
+before loading it. This addresses missing Apple private-PKI trust on Linux
+(`verify_code=19`). The context is used only for HTTPS Apple hosts; redirects
+outside Apple are rejected. Hostname and certificate-chain verification stay
+enabled. Provider HTTP/WebSocket TLS and the system CA store remain unchanged.
+
+Root reference: [Apple's published root certificate list](https://support.apple.com/en-us/126047),
+Apple Root CA, serial 02, expires 2035-02-09. Implementation reference:
+[SideInstaller's GrandSlam client](https://github.com/FrizzleM/SideInstaller/blob/v1.6.1/rust-core/vendor/isideload/src/auth/grandslam.rs).
+
 ## Rollback
 
 ```sh

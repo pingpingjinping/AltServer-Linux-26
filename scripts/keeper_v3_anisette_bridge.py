@@ -23,7 +23,7 @@ import time
 import uuid
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen
 
 CURRENT_MAC_CLIENT_INFO = '<MacBookPro18,3> <macOS;26.6;25F84> <com.apple.AuthKit/1 (com.apple.akd/1.0)>'
 CURRENT_MAC_USER_AGENT = 'AuthKit/1 (Macintosh; OS X 26.6) (com.apple.akd/1.0)'
@@ -35,6 +35,39 @@ NETWORK_STAGES = frozenset(('provider metadata', 'Apple URL lookup',
                             'provider WebSocket connect', 'provider provisioning reply',
                             'provider provisioning send', 'Apple start provisioning',
                             'Apple finish provisioning'))
+
+
+# Apple Root CA (serial 2), also bundled by SideInstaller v1.6.1 isideload.
+# SHA-256 independently checked against Apple's published root-store list:
+# https://support.apple.com/en-us/126047
+APPLE_ROOT_SHA256 = 'b0b1730ecbc7ff4505142c49f1295e6eda6bcaed7e2c68c5be91b5a11001f024'
+APPLE_ROOT_PEM = "-----BEGIN CERTIFICATE-----\nMIIEuzCCA6OgAwIBAgIBAjANBgkqhkiG9w0BAQUFADBiMQswCQYDVQQGEwJVUzET\nMBEGA1UEChMKQXBwbGUgSW5jLjEmMCQGA1UECxMdQXBwbGUgQ2VydGlmaWNhdGlv\nbiBBdXRob3JpdHkxFjAUBgNVBAMTDUFwcGxlIFJvb3QgQ0EwHhcNMDYwNDI1MjE0\nMDM2WhcNMzUwMjA5MjE0MDM2WjBiMQswCQYDVQQGEwJVUzETMBEGA1UEChMKQXBw\nbGUgSW5jLjEmMCQGA1UECxMdQXBwbGUgQ2VydGlmaWNhdGlvbiBBdXRob3JpdHkx\nFjAUBgNVBAMTDUFwcGxlIFJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAw\nggEKAoIBAQDkkakJH5HbHkdQ6wXtXnmELes2oldMVeyLGYne+Uts9QerIjAC6Bg+\n+FAJ039BqJj50cpmnCRrEdCju+QbKsMflZ56DKRHi1vUFjczy8QPTc4UadHJGXL1\nXQ7Vf1+b8iUDulWPTV0N8WQ1IxVLFVkds5T39pyez1C6wVhQZ48ItCD3y6wsIG9w\ntj8BMIy3Q88PnT3zK0koGsj+zrW5DtleHNbLPbU6rfQPDgCSC7EhFi501TwN22IW\nq6NxkkdTVcGvL0Gz+PvjcM3mo0xFfh9Ma1CWQYnEdGILEINBhzOKgbEwWOxaBDKM\naLOPHd5lc/9nXmW8Sdh2nzMUZaF3lMktAgMBAAGjggF6MIIBdjAOBgNVHQ8BAf8E\nBAMCAQYwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUK9BpR5R2Cf70a40uQKb3\nR01/CF4wHwYDVR0jBBgwFoAUK9BpR5R2Cf70a40uQKb3R01/CF4wggERBgNVHSAE\nggEIMIIBBDCCAQAGCSqGSIb3Y2QFATCB8jAqBggrBgEFBQcCARYeaHR0cHM6Ly93\nd3cuYXBwbGUuY29tL2FwcGxlY2EvMIHDBggrBgEFBQcCAjCBthqBs1JlbGlhbmNl\nIG9uIHRoaXMgY2VydGlmaWNhdGUgYnkgYW55IHBhcnR5IGFzc3VtZXMgYWNjZXB0\nYW5jZSBvZiB0aGUgdGhlbiBhcHBsaWNhYmxlIHN0YW5kYXJkIHRlcm1zIGFuZCBj\nb25kaXRpb25zIG9mIHVzZSwgY2VydGlmaWNhdGUgcG9saWN5IGFuZCBjZXJ0aWZp\nY2F0aW9uIHByYWN0aWNlIHN0YXRlbWVudHMuMA0GCSqGSIb3DQEBBQUAA4IBAQBc\nNplMLXi37Yyb3PN3m/J20ncwT8EfhYOFG5k9RzfyqZtAjizUsZAS2L70c5vu0mQP\ny3lPNNiiPvl4/2vIB+x9OYOLUyDTOMSxv5pPCmv/K/xZpwUJfBdAVhEedNO3iyM7\nR6PVbyTi69G3cN8PReEnyvFteO3ntRcXqNx+IjXKJdXZD9Zr1KIkIxH3oayPc4Fg\nxhtbCS+SsvhESPBgOJ4V9T0mZyCKM2r3DYLP3uujL/lTaltkwGMzd/c6ByxW69oP\nIQ7aunMZT7XZNn/Bh1XZp5m5MkL72NVxnn6hUrcbvZNCJBIqxw8dtk2cXmPIS4AX\nUKqK1drk/NAJBzewdXUh\n-----END CERTIFICATE-----\n"
+
+
+def apple_tls_context():
+    """Extend platform trust for this application's Apple requests only."""
+    der = ssl.PEM_cert_to_DER_cert(APPLE_ROOT_PEM)
+    if hashlib.sha256(der).hexdigest() != APPLE_ROOT_SHA256:
+        raise ValueError('Bundled Apple root does not match its published fingerprint')
+    context = ssl.create_default_context()
+    context.load_verify_locations(cadata=APPLE_ROOT_PEM)
+    return context
+
+
+class AppleRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parts = https_origin(newurl)
+        if not parts.hostname.endswith('.apple.com'):
+            raise ValueError('Apple request redirected outside Apple')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def apple_urlopen(request, timeout):
+    parts = https_origin(request.full_url)
+    if not parts.hostname.endswith('.apple.com'):
+        raise ValueError('Apple trust context is restricted to Apple hosts')
+    opener = build_opener(HTTPSHandler(context=apple_tls_context()), AppleRedirectHandler())
+    return opener.open(request, timeout=timeout)
 
 
 def network_operation(stage, operation, *args, **kwargs):
@@ -388,7 +421,7 @@ def provision_current_mac_state(path, provider, identity):
         data = None if body is None else plistlib.dumps(body, fmt=plistlib.FMT_XML)
         req = Request(url, data=data, headers=headers, method='GET' if data is None else 'POST')
         def exchange():
-            with urlopen(req, timeout=min(20, left)) as response:
+            with apple_urlopen(req, timeout=min(20, left)) as response:
                 return plistlib.loads(read_response(response, 1024 * 1024, deadline))
         result = network_operation(stage, exchange)
         if not isinstance(result, dict):
