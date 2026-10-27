@@ -10,11 +10,13 @@ from pathlib import Path
 import plistlib
 import struct
 import subprocess
+import socket
+import ssl
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 
@@ -86,6 +88,45 @@ class RetryTests(unittest.TestCase):
                 b.read_response(io.BytesIO(b'x' * 10000), deadline=20)
         with self.assertRaises(ValueError):
             b.read_response(io.BytesIO(b'x' * 65537))
+
+
+class NetworkDiagnosticsTests(unittest.TestCase):
+    def test_typed_ca_dns_tls_and_timeout_details_do_not_expose_private_reasons(self):
+        cert = ssl.SSLCertVerificationError(1, 'PRIVATE certificate and request')
+        cert.verify_code = 20
+        for reason, expected in ((cert, 'verify_code=20'),
+                                 (socket.gaierror(-2, 'PRIVATE DNS'), 'DNS resolution failed'),
+                                 (ConnectionResetError(104, 'PRIVATE reset'), 'connection reset'),
+                                 (TimeoutError('PRIVATE timeout'), 'network timeout'),
+                                 ('PRIVATE arbitrary provider response', 'reason redacted'),
+                                 ('Tunnel connection failed: 403 PRIVATE', 'proxy tunnel HTTP 403')):
+            failure = URLError(reason)
+            failure.anisette_stage = 'Apple URL lookup'
+            result = b.network_error_summary(failure)
+            self.assertIn('stage=Apple URL lookup', result)
+            self.assertIn(expected, result)
+            self.assertNotIn('PRIVATE', result)
+        self.assertNotIn('PRIVATE', b.network_error_summary(error(403)))
+
+    def test_network_step_marks_the_failing_operation_without_changing_exception(self):
+        failure = URLError(socket.gaierror(-2, 'private host'))
+        with self.assertRaises(URLError) as caught:
+            b.network_operation('Apple start provisioning', Mock(side_effect=failure))
+        self.assertIs(caught.exception, failure)
+        self.assertIn('stage=Apple start provisioning', b.network_error_summary(failure))
+        failure.anisette_stage = 'PRIVATE not a fixed phase'
+        self.assertNotIn('PRIVATE', b.network_error_summary(failure))
+
+    def test_read_only_diagnose_never_creates_machine_or_calls_controller(self):
+        output = io.StringIO()
+        with patch.object(b, 'fetch_provider_identity', return_value=OLD), \
+                patch.object(t, 'urlopen', return_value=io.BytesIO(plistlib.dumps({'urls': {}}))), \
+                patch.object(b, 'provision_current_mac_state') as provision, \
+                patch.object(t.ModernMacTrial, 'apply') as apply, redirect_stdout(output):
+            t.diagnose()
+        provision.assert_not_called()
+        apply.assert_not_called()
+        self.assertIn('Apple URL lookup: OK', output.getvalue())
 
 
 class ProvisionTests(unittest.TestCase):
@@ -176,12 +217,20 @@ class ProvisionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.provision(bad)
         self.assertFalse(self.path.exists())
+
         self.ws.receive_json.side_effect = [{'result': 'GiveIdentifier'},
                                             {'result': 'GiveStartProvisioningData'}]
         bag = {'urls': {'midStartProvisioning': 'https://apple.com.attacker.test/start',
                         'midFinishProvisioning': 'https://gsa.apple.com/finish'}}
         with self.assertRaises(ValueError):
             self.provision([bag])
+        self.assertFalse(self.path.exists())
+
+    def test_provisioning_url_error_reports_lookup_stage_and_leaves_no_state(self):
+        fail = URLError(socket.gaierror(-2, 'PRIVATE lookup'))
+        with patch.object(b, 'urlopen', side_effect=fail), self.assertRaises(URLError):
+            b.provision_current_mac_state(self.path, t.URL, CURRENT)
+        self.assertIn('stage=Apple URL lookup', b.network_error_summary(fail))
         self.assertFalse(self.path.exists())
 
 

@@ -21,7 +21,7 @@ import struct
 import threading
 import time
 import uuid
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
@@ -31,6 +31,65 @@ HEADER_ATTEMPTS = 3
 HEADER_IO_TIMEOUT = 5
 HEADER_RETRY_WINDOW = 20
 MAX_RESPONSE = 65536
+NETWORK_STAGES = frozenset(('provider metadata', 'Apple URL lookup',
+                            'provider WebSocket connect', 'provider provisioning reply',
+                            'provider provisioning send', 'Apple start provisioning',
+                            'Apple finish provisioning'))
+
+
+def network_operation(stage, operation, *args, **kwargs):
+    """Attach a fixed public step name; never stringify an upstream response."""
+    if stage not in NETWORK_STAGES:
+        raise ValueError('Unknown network diagnostic stage')
+    try:
+        return operation(*args, **kwargs)
+    except Exception as error:
+        if getattr(error, 'anisette_stage', None) not in NETWORK_STAGES:
+            error.anisette_stage = stage
+        raise
+
+
+def network_error_summary(error):
+    """Allow only typed transport details, never URLs, bodies or opaque reasons."""
+    stage = getattr(error, 'anisette_stage', None)
+    detail = ['stage=' + (stage if stage in NETWORK_STAGES else 'unspecified')]
+    cause = error
+    for _ in range(4):
+        if isinstance(cause, HTTPError):
+            if type(cause.code) is int:
+                detail.append('HTTP ' + str(cause.code))
+            return '; '.join(detail)
+        if isinstance(cause, URLError):
+            cause = cause.reason
+        else:
+            break
+    if isinstance(cause, ssl.SSLCertVerificationError):
+        detail.append('TLS certificate verification failed')
+        verify_code = getattr(cause, 'verify_code', None)
+        if type(verify_code) is int:
+            detail.append('verify_code=' + str(verify_code))
+    elif isinstance(cause, ssl.SSLError):
+        detail.append('TLS handshake/transport error')
+        reason = getattr(cause, 'reason', None)
+        if isinstance(reason, str) and re.fullmatch(r'[A-Z0-9_]{1,80}', reason):
+            detail.append('ssl_reason=' + reason)
+    elif isinstance(cause, socket.gaierror):
+        detail.append('DNS resolution failed')
+    elif isinstance(cause, TimeoutError):
+        detail.append('network timeout')
+    elif isinstance(cause, ConnectionResetError):
+        detail.append('connection reset by peer')
+    elif isinstance(cause, ConnectionRefusedError):
+        detail.append('connection refused')
+    elif isinstance(cause, str):
+        match = re.search(r'Tunnel connection failed: (\d{3})\b', cause)
+        detail.append('proxy tunnel HTTP ' + match[1] if match else 'URL transport failed (reason redacted)')
+    else:
+        detail.append(type(cause).__name__)
+    number = getattr(cause, 'errno', None)
+    if type(number) is int:
+        detail.append('errno=' + str(number))
+    return '; '.join(detail)
 
 
 def https_origin(url):
@@ -319,7 +378,7 @@ def provision_current_mac_state(path, provider, identity):
                'Content-Type': 'text/x-xml-plist', 'Accept': 'text/x-xml-plist',
                'X-Apple-App-Info': 'com.apple.gs.xcode.auth', 'X-Xcode-Version': '14.2 (14C18)'}
 
-    def apple(url, body=None):
+    def apple(url, body=None, stage='Apple URL lookup'):
         parts = https_origin(url)
         if not parts.hostname.endswith('.apple.com'):
             raise ValueError('Provisioning URL bag points outside Apple')
@@ -328,8 +387,10 @@ def provision_current_mac_state(path, provider, identity):
             raise TimeoutError('Provisioning deadline expired')
         data = None if body is None else plistlib.dumps(body, fmt=plistlib.FMT_XML)
         req = Request(url, data=data, headers=headers, method='GET' if data is None else 'POST')
-        with urlopen(req, timeout=min(20, left)) as response:
-            result = plistlib.loads(read_response(response, 1024 * 1024, deadline))
+        def exchange():
+            with urlopen(req, timeout=min(20, left)) as response:
+                return plistlib.loads(read_response(response, 1024 * 1024, deadline))
+        result = network_operation(stage, exchange)
         if not isinstance(result, dict):
             raise ValueError('Invalid Apple provisioning response')
         return result
@@ -338,25 +399,28 @@ def provision_current_mac_state(path, provider, identity):
     endpoints = [bag.get(key) for key in ('midStartProvisioning', 'midFinishProvisioning')]
     if not all(isinstance(url, str) and url for url in endpoints):
         raise ValueError('Apple URL bag lacks provisioning endpoints')
-    ws = ProvisioningSocket(provider, deadline)
+    ws = network_operation('provider WebSocket connect', ProvisioningSocket, provider, deadline)
     stage = 0
     try:
         for _ in range(8):
-            payload = ws.receive_json()
+            payload = network_operation('provider provisioning reply', ws.receive_json)
             result = payload.get('result')
             if result == 'GiveIdentifier' and stage == 0:
-                ws.send_json({'identifier': base64.b64encode(identifier).decode('ascii')})
+                network_operation('provider provisioning send', ws.send_json,
+                                  {'identifier': base64.b64encode(identifier).decode('ascii')})
             elif result in ('GiveStartProvisioningData', 'GiveEndProvisioningData') and stage in (1, 2):
                 if result != ('GiveStartProvisioningData' if stage == 1 else 'GiveEndProvisioningData'):
                     raise ValueError('Unexpected provisioning sequence')
                 request = {} if stage == 1 else {'cpim': payload['cpim']}
-                result = apple(endpoints[stage - 1], {'Header': {}, 'Request': request}).get('Response')
+                result = apple(endpoints[stage - 1], {'Header': {}, 'Request': request},
+                               'Apple start provisioning' if stage == 1 else 'Apple finish provisioning').get('Response')
                 if not isinstance(result, dict) or result.get('Status', {}).get('ec', 0):
                     raise ValueError('Apple rejected machine provisioning')
                 fields = ('spim',) if stage == 1 else ('ptm', 'tk')
                 if not all(isinstance(result.get(field), str) and result[field] for field in fields):
                     raise ValueError('Incomplete Apple machine provisioning response')
-                ws.send_json({field: result[field] for field in fields})
+                network_operation('provider provisioning send', ws.send_json,
+                                  {field: result[field] for field in fields})
             elif result == 'ProvisioningSuccess' and stage == 3:
                 adi = base64.b64decode(payload['adi_pb'], validate=True)
                 if not adi or len(adi) > 1024 * 1024:
