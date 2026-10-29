@@ -65,7 +65,7 @@ class AnisetteDataManager
 public:
 	static AnisetteDataManager* instance();
 
-	std::shared_ptr<AnisetteData> FetchAnisetteData();
+	std::shared_ptr<AnisetteData> FetchAnisetteData(std::string sim = "");
 	bool LoadDependencies();
 
 	bool ResetProvisioning();

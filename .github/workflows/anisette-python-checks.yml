@@ -6,7 +6,7 @@ on:
       - 'tests/**'
       - '.github/workflows/anisette-python-checks.yml'
   push:
-    branches: [codex/keeper-v3-data-20261024]
+    branches: [codex/keeper-v3-data-20261024, codex/classic-auth-oct2026]
   workflow_dispatch:
 permissions:
   contents: read

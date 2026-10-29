@@ -112,7 +112,8 @@ AppleAPI* AppleAPI::getInstance()
 AppleAPI::AppleAPI() : _servicesClient(U("https://developerservices2.apple.com/services/v1")), _client(U("https://developerservices2.apple.com/services/QH65B2")), _gsaClient(U("https://gsa.apple.com"))
 {
 	http_client_config config;
-	config.set_validate_certificates(false);
+	config.set_validate_certificates(true);
+    config.set_max_redirects(0);
 
 	_gsaClient = web::http::client::http_client(U("https://gsa.apple.com"), config);
 

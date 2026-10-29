@@ -64,22 +64,8 @@ AnisetteData::AnisetteData(std::string machineID,
 
 std::ostream& operator<<(std::ostream& os, const AnisetteData& anisetteData)
 {
-	time_t time;
-	struct tm* tm;
-	char dateString[64];
-
-	time = anisetteData.date().tv_sec;
-	tm = gmtime(&time);
-
-	strftime(dateString, sizeof dateString, "%Y-%m-%dT%H:%M:%SZ", tm);
-
-	os << "MachineID : " << anisetteData.machineID() <<
-		"\nOne-Time Password: " << anisetteData.oneTimePassword() <<
-		"\nLocal User ID: " << anisetteData.localUserID() <<
-		"\nDevice UDID: " << anisetteData.deviceUniqueIdentifier() <<
-		"\nDevice Description: " << anisetteData.deviceDescription() <<
-		"\nDate: " << dateString;
-
+	// Streaming Anisette must never expose OTPs or personal device identifiers.
+	os << "AnisetteData (values redacted)";
 	return os;
 }
 

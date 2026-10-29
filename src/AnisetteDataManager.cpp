@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include "AnisetteData.h"
+#include "AuthCompatibility.h"
 #include "AltServerApp.h"
 
 #define odslog(msg) { std::stringstream ss; ss << msg << std::endl; OutputDebugStringA(ss.str().c_str()); }
@@ -58,7 +59,7 @@ std::string GetAnisetteURL() {
 	return U("https://armconverter.com/anisette/irGb3Quww8zrhgqnzmrx");
 }
 
-std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
+std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData(std::string sim)
 {
 	// auto client = web::http::client::http_client(U("https://armconverter.com"));
 	// std::string wideURI = ("/anisette/irGb3Quww8zrhgqnzmrx");
@@ -69,8 +70,28 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 	// http_request request(methods::GET);
 	// request.set_request_uri(builder.to_string());
 
-	auto client = web::http::client::http_client(GetAnisetteURL());
-	http_request request(methods::GET);
+	const bool modern = altauth::enabled();
+    const auto url = GetAnisetteURL();
+    web::uri endpoint(url);
+    if (modern && (endpoint.scheme() != "http" || endpoint.host() != "127.0.0.1" ||
+                   !endpoint.user_info().empty() || !endpoint.query().empty() ||
+                   !endpoint.fragment().empty() || endpoint.path() != "/"))
+        throw std::runtime_error("official-2026 requires an explicit isolated loopback Anisette adapter URL ending in /");
+    if (!sim.empty() && !modern)
+        throw std::runtime_error("Anisette resync requires official-2026 mode");
+    http_client_config config;
+    config.set_validate_certificates(true);
+    config.set_max_redirects(0);
+    config.set_timeout(std::chrono::seconds(30));
+    auto client = web::http::client::http_client(url, config);
+    http_request request(sim.empty() ? methods::GET : methods::POST);
+    if (!sim.empty()) {
+        if (sim.size() > 65536) throw std::runtime_error("Oversized Anisette resync data");
+        request.set_request_uri("resync");
+        json::value body;
+        body["sim"] = json::value::string(sim);
+        request.set_body(body);
+    }
 	
 	std::map<utility::string_t, utility::string_t> headers = {
 		{"User-Agent", "Xcode"},
@@ -102,7 +123,7 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 				}
 				return response.extract_json();
 			})
-		.then([&anisetteData](pplx::task<json::value> previousTask)
+		.then([&anisetteData, modern](pplx::task<json::value> previousTask)
 			{
 				odslog("parse anisette data ret");
 				json::value jsonVal = previousTask.get();
@@ -151,7 +172,19 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 					jsonVal.at("X-Apple-Locale").as_string(),
 					jsonVal.at("X-Apple-I-TimeZone").as_string());
 				
-				//IterateJSONValue();
+				if (modern) {
+                    for (const auto& key : {"authenticationUserAgent", "provisionedClientInfo", "provisionedUserAgent"})
+                        if (!jsonVal.has_string_field(key))
+                            throw std::runtime_error("Anisette adapter lacks provisioning identity metadata");
+                    for (const auto& key : keys) altauth::headerValue(jsonVal.at(key).as_string());
+                    const auto agent = jsonVal.at("authenticationUserAgent").as_string();
+                    altauth::identity(anisetteData->deviceDescription(), agent,
+                        jsonVal.at("provisionedClientInfo").as_string(),
+                        jsonVal.at("provisionedUserAgent").as_string());
+                    if (std::abs(std::difftime(std::time(nullptr), tv.tv_sec)) > 120)
+                        throw std::runtime_error("Anisette response is stale");
+                    anisetteData->authenticationUserAgent = agent;
+                }
 			});
 	
 	task.get();

@@ -1345,7 +1345,7 @@ pplx::task<bool> AppleAPI::RequestTwoFactorCode(
     ALTLogRequestHeaders("SMS INIT", request);
 
     web::http::client::http_client_config config;
-    config.set_validate_certificates(false);
+    config.set_validate_certificates(true);
 
     auto client =
         std::make_shared<web::http::client::http_client>(
@@ -1625,7 +1625,7 @@ pplx::task<bool> AppleAPI::RequestTwoFactorCode(
                 verifyRequest);
 
             web::http::client::http_client_config verifyConfig;
-            verifyConfig.set_validate_certificates(false);
+            verifyConfig.set_validate_certificates(true);
 
             auto verifyClient =
                 std::make_shared<
@@ -1849,7 +1849,7 @@ pplx::task<plist_t> AppleAPI::SendAuthenticationRequest(std::map<std::string, pl
 	//auto task = this->gsaClient().request(request) 
 	//added following block until auto task =
 	web::http::client::http_client_config config;
-   config.set_validate_certificates(false);
+   config.set_validate_certificates(true);
 
    auto freshGsaClient = std::make_shared<web::http::client::http_client>(
     U("https://gsa.apple.com"),config);
