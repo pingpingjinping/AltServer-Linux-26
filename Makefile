@@ -118,3 +118,13 @@ clean:: lib_libimobiledevice_clean lib_AltSign_clean lib_dnssd_loader_clean
 
 all:: preprocess $(BUILD_DIR)/$(PROGRAM)
 .DEFAULT_GOAL := all
+
+# Link the same production objects with an offline test entry point.
+AUTH_TEST_OBJ := $(BUILD_DIR)/objs/tests/auth_protocol.cpp.o
+$(AUTH_TEST_OBJ): lib_AltSign lib_libimobiledevice lib_dnssd_loader
+$(AUTH_TEST_OBJ): EXTRA_FLAGS := -I$(main_patched_root) -I$(ROOT_DIR)/src -fpermissive -include "common.h" $(INC_CFLAGS)
+$(BUILD_DIR)/auth-protocol-tests: $(filter-out $(BUILD_DIR)/objs/src/AltServerMain.cpp.o,$(main_objs)) $(AUTH_TEST_OBJ) $(BUILD_DIR)/libimobiledevice.a $(BUILD_DIR)/AltSign.a $(BUILD_DIR)/libplist.a $(BUILD_DIR)/dnssd_loader.a
+	$(CC) -o $@ $^ $(LDFLAGS)
+.PHONY: auth-tests
+auth-tests: $(BUILD_DIR)/auth-protocol-tests
+	$(BUILD_DIR)/auth-protocol-tests

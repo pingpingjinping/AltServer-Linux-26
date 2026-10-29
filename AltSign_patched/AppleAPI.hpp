@@ -25,6 +25,7 @@
 #include "Error.hpp"
 
 #include "AppleAPISession.h"
+#include "AuthCompatibility.h"
 
 extern std::string StringFromWideString(std::string wideString);
 
@@ -37,7 +38,8 @@ public:
 		std::string appleID,
 		std::string password,
 		std::shared_ptr<AnisetteData> anisetteData,
-		std::optional<std::function <pplx::task<std::optional<std::string>>(void)>> verificationHandler);
+		std::optional<std::function <pplx::task<std::optional<std::string>>(void)>> verificationHandler,
+        std::shared_ptr<altauth::Context> context = nullptr);
     
     // Teams
 	pplx::task<std::vector<std::shared_ptr<Team>>> FetchTeams(std::shared_ptr<Account> account, std::shared_ptr<AppleAPISession> session);
@@ -66,6 +68,7 @@ public:
     pplx::task<bool> DeleteProvisioningProfile(std::shared_ptr<ProvisioningProfile> profile, std::shared_ptr<Team> team, std::shared_ptr<AppleAPISession> session);
     
 private:
+    friend struct AuthProtocolTests;
     AppleAPI();
     
     static AppleAPI *instance_;
@@ -90,7 +93,8 @@ private:
 		std::shared_ptr<Team> team);
 
 	pplx::task<plist_t> SendAuthenticationRequest(std::map<std::string, plist_t> requestParameters,
-		std::shared_ptr<AnisetteData> anisetteData);
+		std::shared_ptr<AnisetteData> anisetteData,
+        std::shared_ptr<altauth::Context> context = nullptr);
 
 	pplx::task<web::json::value> SendServicesRequest(std::string uri,
 		std::string method,
@@ -98,7 +102,7 @@ private:
 		std::shared_ptr<AppleAPISession> session,
 		std::shared_ptr<Team> team);
 
-	pplx::task<std::string> FetchAuthToken(std::map<std::string, plist_t> requestParameters, std::vector<unsigned char> sk, std::shared_ptr<AnisetteData> anisetteData);
+	pplx::task<std::string> FetchAuthToken(std::map<std::string, plist_t> requestParameters, std::vector<unsigned char> sk, std::shared_ptr<AnisetteData> anisetteData, std::shared_ptr<altauth::Context> context = nullptr);
 	pplx::task<std::shared_ptr<Account>> FetchAccount(std::shared_ptr<AppleAPISession> session);
 
 	pplx::task<bool> RequestTwoFactorCode(
@@ -106,6 +110,11 @@ private:
 		std::string idmsToken,
 		std::shared_ptr<AnisetteData> anisetteData,
 		const std::function <pplx::task<std::optional<std::string>>(void)>& verificationHandler);
+
+    pplx::task<bool> RequestModernTwoFactorCode(
+        std::string dsid, std::string token, altauth::Factor factor,
+        const std::function<pplx::task<std::optional<std::string>>()>& handler,
+        std::shared_ptr<altauth::Context> context);
 
 	template<typename T>
 	T ProcessAnyResponse(plist_t plist, std::string errorCodeKey, std::vector<std::string> errorMessageKeys, std::function<T(plist_t)> parseHandler, std::function<std::optional<APIError>(int64_t)> resultCodeHandler)

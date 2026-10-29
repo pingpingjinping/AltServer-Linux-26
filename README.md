@@ -205,3 +205,10 @@ If you use a local anisette server, export it before running the script:
 export ALTSERVER_ANISETTE_SERVER="http://127.0.0.1:6970"
 ```
 
+
+## October 2026 authentication preparation
+
+The optional `official-2026` flow, audited upstream commits, offline tests,
+Classic 2.3.2 test plan and rollback are described in
+[the preparation notes](docs/classic-auth-oct2026.md). It is disabled by default
+and has not been validated with an Apple account or deployed to WalnutPi.

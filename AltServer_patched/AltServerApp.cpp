@@ -1272,7 +1272,15 @@ pplx::task<std::pair<std::shared_ptr<Account>, std::shared_ptr<AppleAPISession>>
 			throw ServerError(ServerErrorCode::InvalidAnisetteData);
 		}
 
-		return AppleAPI::getInstance()->Authenticate(appleID, password, anisetteData, verificationHandler);
+		auto context = std::make_shared<altauth::Context>();
+        context->modern = altauth::enabled();
+        if (context->modern) {
+            context->refresh = [] { return AnisetteDataManager::instance()->FetchAnisetteData(); };
+            context->resync = [](const std::string& sim) {
+                return AnisetteDataManager::instance()->FetchAnisetteData(sim);
+            };
+        }
+        return AppleAPI::getInstance()->Authenticate(appleID, password, anisetteData, verificationHandler, context);
 	});
 }
 

@@ -1,7 +1,7 @@
 name: Keeper auth ARM64 check
 on:
   push:
-    branches: [codex/keeper-auth-20261024]
+    branches: [codex/keeper-auth-20261024, codex/classic-auth-oct2026]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -18,7 +18,7 @@ jobs:
           mkdir -p build
           docker run --rm -v "$PWD:/workdir" -w /workdir/build \
             ghcr.io/nyamisty/altserver_builder_alpine_aarch64 \
-            bash -c 'make -f ../Makefile -j2'
+            bash -c 'make -f ../Makefile -j2 all auth-tests'
           sudo chown -R "$(id -u):$(id -g)" build
       - name: Check executable
         run: |

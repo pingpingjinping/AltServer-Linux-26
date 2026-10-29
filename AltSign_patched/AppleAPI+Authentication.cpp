@@ -52,6 +52,64 @@ static std::string ALTAuthKitUserAgent()
         : "AuthKit/1 (Macintosh; OS X 26.5.2) (com.apple.dt.Xcode/26.0)";
 }
 
+static std::shared_ptr<AnisetteData> ALTUseFreshData(
+    std::shared_ptr<altauth::Context> context, std::shared_ptr<AnisetteData> fresh)
+{
+    auto old = context->current;
+    if (!fresh || !old || fresh->authenticationUserAgent.empty() ||
+        fresh->deviceDescription() != old->deviceDescription() ||
+        fresh->authenticationUserAgent != old->authenticationUserAgent ||
+        fresh->deviceUniqueIdentifier() != old->deviceUniqueIdentifier() ||
+        fresh->localUserID() != old->localUserID() || fresh->machineID() != old->machineID())
+        throw std::runtime_error("Anisette identity changed during authentication");
+    context->current = fresh;
+    return fresh;
+}
+
+static std::shared_ptr<AnisetteData> ALTRefreshData(std::shared_ptr<altauth::Context> context)
+{
+    if (!context->refresh) throw std::runtime_error("Fresh Anisette handler unavailable");
+    return ALTUseFreshData(context, context->refresh());
+}
+
+static plist_t ALTModernClientDictionary(std::shared_ptr<AnisetteData> data)
+{
+    auto cpd = plist_new_dict();
+    for (const auto& pair : std::map<std::string, std::string>{
+        {"bootstrap", "true"}, {"icscrec", "true"}, {"pbe", "false"},
+        {"prkgen", "true"}, {"svct", "iCloud"}, {"loc", "en_US"},
+        {"X-Apple-I-MD", data->oneTimePassword()}, {"X-Apple-I-MD-M", data->machineID()},
+        {"X-Mme-Device-Id", data->deviceUniqueIdentifier()}})
+        plist_dict_set_item(cpd, pair.first.c_str(), plist_new_string(pair.second.c_str()));
+    return cpd;
+}
+
+static long ALTStatusInteger(plist_t dictionary, const char* key)
+{
+    auto node = dictionary ? plist_dict_get_item(dictionary, key) : nullptr;
+    if (!node) return 0;
+    if (plist_get_node_type(node) == PLIST_UINT) {
+        uint64_t value = 0; plist_get_uint_val(node, &value); return (int64_t)value;
+    }
+    if (plist_get_node_type(node) == PLIST_STRING) {
+        char* value = nullptr; plist_get_string_val(node, &value);
+        std::string text = value ? value : ""; free(value);
+        size_t end = 0;
+        try { long result = std::stol(text, &end); if (end == text.size()) return result; } catch (...) {}
+    }
+    throw std::runtime_error("Invalid Apple authentication status value");
+}
+
+static std::string ALTStatusString(plist_t dictionary, const char* key)
+{
+    auto node = dictionary ? plist_dict_get_item(dictionary, key) : nullptr;
+    if (!node) return "";
+    char* value = nullptr;
+    if (plist_get_node_type(node) != PLIST_STRING) throw APIError(APIErrorCode::InvalidResponse);
+    plist_get_string_val(node, &value);
+    std::string result = value ? value : ""; free(value); return result;
+}
+
 //struct ccrng_state* ccDRBGGetRngState(void);
 
 static const char ALTHexCharacters[] = "0123456789abcdef";
@@ -74,7 +132,7 @@ static void ALTResetGrandSlamCookies()
     odslog("GrandSlam logical session: cookie jar reset");
 }
 
-static void ALTStoreGrandSlamCookies(const http_response& response)
+static void ALTStoreGrandSlamCookies(const http_response& response, std::shared_ptr<altauth::Context> context = nullptr)
 {
     if (!response.headers().has(U("Set-Cookie"))) return;
     
@@ -92,109 +150,28 @@ std::string raw = StringFromWideString(it->second);
         odslog("GrandSlam logical session: Set-Cookie present but not parseable");
         return;
     }
-    ALTGrandSlamCookieJar[pair.substr(0, eq)] = pair.substr(eq + 1);
-    odslog("GrandSlam logical session: cookie stored; jar size=" << ALTGrandSlamCookieJar.size());
+    auto& jar = context && context->modern ? context->cookies : ALTGrandSlamCookieJar;
+    jar[pair.substr(0, eq)] = pair.substr(eq + 1);
+    odslog("GrandSlam logical session: cookie stored; jar size=" << jar.size());
 }
 
-static void ALTApplyGrandSlamCookies(http_request& request)
+static void ALTApplyGrandSlamCookies(http_request& request, std::shared_ptr<altauth::Context> context = nullptr)
 {
-    if (ALTGrandSlamCookieJar.empty())
+    auto& jar = context && context->modern ? context->cookies : ALTGrandSlamCookieJar;
+    if (jar.empty())
     {
         odslog("GrandSlam logical session: outgoing cookies=0");
         return;
     }
     std::string value;
-    for (const auto& cookie : ALTGrandSlamCookieJar)
+    for (const auto& cookie : jar)
     {
         if (!value.empty()) value += "; ";
         value += cookie.first + "=" + cookie.second;
     }
     if (request.headers().has(U("Cookie"))) request.headers().remove(U("Cookie"));
     request.headers().add(U("Cookie"), WideStringFromString(value));
-    odslog("GrandSlam logical session: outgoing cookies=" << ALTGrandSlamCookieJar.size());
-}
-
-
-static void ALTLogTrustedPhoneNumbers(plist_t dictionary, const char* label)
-{
-    if (dictionary == nullptr)
-    {
-        odslog("2FA phone diagnostic: " << label << " dictionary is NULU(");
-        return;
-    }
-
-    plist_t phones = plist_dict_get_item(dictionary, ")trustedPhoneNumbers");
-
-    if (phones == nullptr)
-    {
-        odslog("2FA phone diagnostic: " << label
-               << " has no trustedPhoneNumbers");
-        return;
-    }
-
-    plist_type type = plist_get_node_type(phones);
-
-    odslog("2FA phone diagnostic: " << label
-           << " trustedPhoneNumbers present, type=" << type);
-
-    if (type != PLIST_ARRAY)
-    {
-        return;
-    }
-
-    uint32_t count = plist_array_get_size(phones);
-
-    odslog("2FA phone diagnostic: " << label
-           << " trustedPhoneNumbers count=" << count);
-
-    for (uint32_t i = 0; i < count; i++)
-    {
-        plist_t phone = plist_array_get_item(phones, i);
-
-        if (phone == nullptr || plist_get_node_type(phone) != PLIST_DICT)
-        {
-            odslog("2FA phone diagnostic: entry " << i
-                   << " is not a dictionary");
-            continue;
-        }
-
-        plist_t idNode = plist_dict_get_item(phone, "id");
-
-        if (idNode == nullptr)
-        {
-            odslog("2FA phone diagnostic: entry " << i
-                   << " has no id");
-            continue;
-        }
-
-        plist_type idType = plist_get_node_type(idNode);
-
-        if (idType == PLIST_STRING)
-        {
-            char* id = nullptr;
-            plist_get_string_val(idNode, &id);
-
-            if (id != nullptr)
-            {
-                odslog("2FA phone diagnostic: entry " << i
-                       << " id=" << id);
-                free(id);
-            }
-        }
-        else if (idType == PLIST_UINT)
-        {
-            uint64_t id = 0;
-            plist_get_uint_val(idNode, &id);
-
-            odslog("2FA phone diagnostic: entry " << i
-                   << " id=" << id);
-        }
-        else
-        {
-            odslog("2FA phone diagnostic: entry " << i
-                   << " id present, type=" << idType);
-        }
-    }
+    odslog("GrandSlam logical session: outgoing cookies=" << jar.size());
 }
 
 
@@ -584,9 +561,18 @@ pplx::task<std::pair<std::shared_ptr<Account>, std::shared_ptr<AppleAPISession>>
 	std::string appleID,
 	std::string password,
 	std::shared_ptr<AnisetteData> anisetteData,
-	std::optional<std::function <pplx::task<std::optional<std::string>>(void)>> verificationHandler)
+	std::optional<std::function <pplx::task<std::optional<std::string>>(void)>> verificationHandler,
+    std::shared_ptr<altauth::Context> context)
 {
-	ALTResetGrandSlamCookies(); // new login = new logical Apple HTTP session
+    if (!context) context = std::make_shared<altauth::Context>();
+    context->current = anisetteData;
+    if (context->modern) {
+        altauth::headerValue(context->current->deviceDescription());
+        altauth::headerValue(context->current->authenticationUserAgent);
+        std::transform(appleID.begin(), appleID.end(), appleID.begin(),
+            [](unsigned char c) { return std::tolower(c); });
+    }
+    if (!context->modern || context->factors == 0) ALTResetGrandSlamCookies(); // new login = new logical Apple HTTP session
 
 	if (RNG == nullptr)
 	{
@@ -600,60 +586,29 @@ pplx::task<std::pair<std::shared_ptr<Account>, std::shared_ptr<AppleAPISession>>
 	struct tm* tm;
 	char dateString[64];
 
-	time = anisetteData->date().tv_sec;
+	time = context->current->date().tv_sec;
 	//tm = gmtime(&time);
 	//strftime(dateString, sizeof dateString, "%Y-%m-%dT%H:%M:%SZ", tm);
 	tm = gmtime(&time);
 	strftime(dateString, sizeof dateString, "%FT%TZ", tm);
 	
 	
-	odslog("=== ANISETTE DATA BEFORE SRP REQUEST #1 ===");
-
-odslog("machineID: present="
-       << (!anisetteData->machineID().empty())
-       << " length=" << anisetteData->machineID().length());
-
-odslog("oneTimePassword: present="
-       << (!anisetteData->oneTimePassword().empty())
-       << " length=" << anisetteData->oneTimePassword().length());
-
-odslog("localUserID: present="
-       << (!anisetteData->localUserID().empty())
-       << " length=" << anisetteData->localUserID().length());
-
-odslog("deviceUniqueIdentifier: present="
-       << (!anisetteData->deviceUniqueIdentifier().empty())
-       << " length=" << anisetteData->deviceUniqueIdentifier().length());
-
-odslog("deviceSerialNumber: present="
-       << (!anisetteData->deviceSerialNumber().empty())
-       << " length=" << anisetteData->deviceSerialNumber().length());
-
-odslog("routingInfo: " << anisetteData->routingInfo());
-odslog("locale: " << anisetteData->locale());
-odslog("timeZone: " << anisetteData->timeZone());
-odslog("deviceDescription: " << anisetteData->deviceDescription());
-odslog("date epoch: " << anisetteData->date().tv_sec);
-
-odslog("=== END ANISETTE DATA ===");
-	
-	
 	std::map<std::string, plist_t> clientDictionary = {
 		{ "bootstrap", plist_new_bool(true) },
 		{ "icscrec", plist_new_bool(true) },
-		{ "loc", plist_new_string(anisetteData->locale().c_str()) },
+		{ "loc", plist_new_string(context->current->locale().c_str()) },
 		{ "pbe", plist_new_bool(false) },
 		{ "prkgen", plist_new_bool(true) },
 		{ "svct", plist_new_string("iCloud") },
 		{ "X-Apple-I-Client-Time", plist_new_string(dateString) },
-		{ "X-Apple-Locale", plist_new_string(anisetteData->locale().c_str()) },
-		{ "X-Apple-I-TimeZone", plist_new_string(anisetteData->timeZone().c_str()) },
-		{ "X-Apple-I-MD", plist_new_string(anisetteData->oneTimePassword().c_str()) },
-		{ "X-Apple-I-MD-LU", plist_new_string(anisetteData->localUserID().c_str()) },
-		{ "X-Apple-I-MD-M", plist_new_string(anisetteData->machineID().c_str()) },
-		{ "X-Apple-I-MD-RINFO", plist_new_uint(anisetteData->routingInfo()) },
-		{ "X-Mme-Device-Id", plist_new_string(anisetteData->deviceUniqueIdentifier().c_str()) },
-		{ "X-Apple-I-SRL-NO", plist_new_string(anisetteData->deviceSerialNumber().c_str()) }
+		{ "X-Apple-Locale", plist_new_string(context->current->locale().c_str()) },
+		{ "X-Apple-I-TimeZone", plist_new_string(context->current->timeZone().c_str()) },
+		{ "X-Apple-I-MD", plist_new_string(context->current->oneTimePassword().c_str()) },
+		{ "X-Apple-I-MD-LU", plist_new_string(context->current->localUserID().c_str()) },
+		{ "X-Apple-I-MD-M", plist_new_string(context->current->machineID().c_str()) },
+		{ "X-Apple-I-MD-RINFO", plist_new_uint(context->current->routingInfo()) },
+		{ "X-Mme-Device-Id", plist_new_string(context->current->deviceUniqueIdentifier().c_str()) },
+		{ "X-Apple-I-SRL-NO", plist_new_string(context->current->deviceSerialNumber().c_str()) }
 	};
 
 	/* Begin CoreCrypto Logic */
@@ -703,7 +658,7 @@ odslog("=== END ANISETTE DATA ===");
 		{ "o", plist_new_string("init") }
 	};
 
-	auto task = this->SendAuthenticationRequest(parameters, anisetteData)
+	auto task = this->SendAuthenticationRequest(parameters, context->current, context)
 		.then([=](plist_t plist) {
 
 		size_t M_size = ccsrp_get_session_key_length(srp_ctx);
@@ -771,56 +726,29 @@ odslog("=== END ANISETTE DATA ===");
 		struct tm* tm;
 		char dateString[64];
 
-		time = anisetteData->date().tv_sec;
+		time = context->current->date().tv_sec;
 		//tm = gmtime(&time);
 		//strftime(dateString, sizeof dateString, "%Y-%m-%dT%H:%M:%SZ", tm);
 		tm = gmtime(&time);
 		strftime(dateString, sizeof dateString, "%FT%TZ", tm);
 		
 		
-		odslog("=== ANISETTE CONSISTENCY CHECK ===");
-
-odslog("MD lengths: MD=" << anisetteData->oneTimePassword().length()
-       << " MD-M=" << anisetteData->machineID().length()
-       << " MD-LU=" << anisetteData->localUserID().length());
-
-odslog("Device identity lengths: Device-ID="
-       << anisetteData->deviceUniqueIdentifier().length()
-       << " SRL-NO=" << anisetteData->deviceSerialNumber().length());
-
-odslog("RINFO=" << anisetteData->routingInfo());
-
-odslog("Locale/Timezone: "
-       << anisetteData->locale()
-       << " / "
-       << anisetteData->timeZone());
-
-odslog("Client description: "
-       << anisetteData->deviceDescription());
-
-
-odslog("Anisette age seconds: "
-       << (time - anisetteData->date().tv_sec));
-
-odslog("=== END ANISETTE CONSISTENCY CHECK ===");
-		
-		
 		std::map<std::string, plist_t> clientDictionary = {
 		{ "bootstrap", plist_new_bool(true) },
 		{ "icscrec", plist_new_bool(true) },
-		{ "loc", plist_new_string(anisetteData->locale().c_str()) },
+		{ "loc", plist_new_string(context->current->locale().c_str()) },
 		{ "pbe", plist_new_bool(false) },
 		{ "prkgen", plist_new_bool(true) },
 		{ "svct", plist_new_string("iCloud") },
 		{ "X-Apple-I-Client-Time", plist_new_string(dateString) },
-		{ "X-Apple-Locale", plist_new_string(anisetteData->locale().c_str()) },
-		{ "X-Apple-I-TimeZone", plist_new_string(anisetteData->timeZone().c_str()) },
-		{ "X-Apple-I-MD", plist_new_string(anisetteData->oneTimePassword().c_str()) },
-		{ "X-Apple-I-MD-LU", plist_new_string(anisetteData->localUserID().c_str()) },
-		{ "X-Apple-I-MD-M", plist_new_string(anisetteData->machineID().c_str()) },
-		{ "X-Apple-I-MD-RINFO", plist_new_uint(anisetteData->routingInfo()) },
-		{ "X-Mme-Device-Id", plist_new_string(anisetteData->deviceUniqueIdentifier().c_str()) },
-		{ "X-Apple-I-SRL-NO", plist_new_string(anisetteData->deviceSerialNumber().c_str()) }
+		{ "X-Apple-Locale", plist_new_string(context->current->locale().c_str()) },
+		{ "X-Apple-I-TimeZone", plist_new_string(context->current->timeZone().c_str()) },
+		{ "X-Apple-I-MD", plist_new_string(context->current->oneTimePassword().c_str()) },
+		{ "X-Apple-I-MD-LU", plist_new_string(context->current->localUserID().c_str()) },
+		{ "X-Apple-I-MD-M", plist_new_string(context->current->machineID().c_str()) },
+		{ "X-Apple-I-MD-RINFO", plist_new_uint(context->current->routingInfo()) },
+		{ "X-Mme-Device-Id", plist_new_string(context->current->deviceUniqueIdentifier().c_str()) },
+		{ "X-Apple-I-SRL-NO", plist_new_string(context->current->deviceSerialNumber().c_str()) }
 		};
 
 		auto cpd = plist_new_dict();
@@ -837,7 +765,7 @@ odslog("=== END ANISETTE CONSISTENCY CHECK ===");
 			{ "o", plist_new_string("complete") }
 		};
 
-		return this->SendAuthenticationRequest(parameters, anisetteData);
+		return this->SendAuthenticationRequest(parameters, context->current, context);
 			}).then([=](plist_t plist) {
 
 				auto M2_node = plist_dict_get_item(plist, "M2");
@@ -983,13 +911,6 @@ if (statusDictionary == nullptr)
     throw APIError(APIErrorCode::InvalidResponse);
 }
 
-// SideSign 2026 2FA diagnostic.
-// SideSign searches the complete response first, then Status.
-odslog("=== 2FA PHONE DISCOVERY DIAGNOSTIC ===");
-ALTLogTrustedPhoneNumbers(plist, "complete response");
-ALTLogTrustedPhoneNumbers(statusDictionary, "Status");
-odslog("=== END 2FA PHONE DISCOVERY DIAGNOSTIC ===");
-
 bool isTwoFactorEnabled = false;
 
 auto authTypeNode = plist_dict_get_item(statusDictionary, "au");
@@ -1000,7 +921,7 @@ auto authTypeNode = plist_dict_get_item(statusDictionary, "au");
 				{
 					char* authType = nullptr;
 					plist_get_string_val(authTypeNode, &authType);
-					odslog("GrandSlam authentication mode au=" << authType);
+					// Do not log provider-supplied authentication strings.
 
 					if (std::string(authType) == "trustedDeviceSecondaryAuth" ||
     std::string(authType) == "secondaryAuth")
@@ -1008,6 +929,22 @@ auto authTypeNode = plist_dict_get_item(statusDictionary, "au");
     isTwoFactorEnabled = true;
 }
 				}
+
+                if (context->modern) {
+                    auto factor = altauth::factor(ALTStatusString(statusDictionary, "au"),
+                                                  ALTStatusInteger(statusDictionary, "hsc"));
+                    if (factor != altauth::Factor::none) {
+                        if (!verificationHandler) throw APIError(APIErrorCode::RequiresTwoFactorAuthentication);
+                        context->beginFactor();
+                        return this->RequestModernTwoFactorCode(adsid, idmsToken, factor,
+                            *verificationHandler, context).then([=](bool success) {
+                            if (!success) throw APIError(APIErrorCode::AuthenticationHandshakeFailed);
+                            auto fresh = ALTRefreshData(context);
+                            return this->Authenticate(appleID, password, fresh, verificationHandler, context);
+                        });
+                    }
+                    isTwoFactorEnabled = false;
+                }
 
                 // IMPORTANT (Sep 2026): extract and preserve the token material from
                 // THIS successful SRP exchange before deciding whether 2FA is needed.
@@ -1067,9 +1004,9 @@ auto authTypeNode = plist_dict_get_item(statusDictionary, "au");
                         { "pbe", plist_new_string("false") },
                         { "prkgen", plist_new_string("true") },
                         { "svct", plist_new_string("iCloud") },
-                        { "X-Mme-Device-Id", plist_new_string(anisetteData->deviceUniqueIdentifier().c_str()) },
-                        { "X-Apple-I-MD", plist_new_string(anisetteData->oneTimePassword().c_str()) },
-                        { "X-Apple-I-MD-M", plist_new_string(anisetteData->machineID().c_str()) }
+                        { "X-Mme-Device-Id", plist_new_string(context->current->deviceUniqueIdentifier().c_str()) },
+                        { "X-Apple-I-MD", plist_new_string(context->current->oneTimePassword().c_str()) },
+                        { "X-Apple-I-MD-M", plist_new_string(context->current->machineID().c_str()) }
                     };
 
                     auto cpd = plist_new_dict();
@@ -1089,10 +1026,10 @@ auto authTypeNode = plist_dict_get_item(statusDictionary, "au");
                     };
 
                     *adsidValue = preservedAdsid;
-                    return this->FetchAuthToken(parameters, sk, anisetteData)
+                    return this->FetchAuthToken(parameters, sk, context->current, context)
                         .then([=](std::string token) {
                             auto session = std::make_shared<AppleAPISession>(
-                                *adsidValue, token, anisetteData);
+                                *adsidValue, token, context->current);
                             *sessionValue = *session;
                             return this->FetchAccount(session);
                         })
@@ -1147,7 +1084,7 @@ return this->Authenticate(
 	return task;
 }
 
-pplx::task<std::string> AppleAPI::FetchAuthToken(std::map<std::string, plist_t> requestParameters, std::vector<unsigned char> sk, std::shared_ptr<AnisetteData> anisetteData)
+pplx::task<std::string> AppleAPI::FetchAuthToken(std::map<std::string, plist_t> requestParameters, std::vector<unsigned char> sk, std::shared_ptr<AnisetteData> anisetteData, std::shared_ptr<altauth::Context> context)
 {
 	auto apps = requestParameters["app"];
 	auto appNode = plist_array_get_item(apps, 0);
@@ -1157,7 +1094,7 @@ pplx::task<std::string> AppleAPI::FetchAuthToken(std::map<std::string, plist_t> 
 
 	std::string app(appName);
 
-	return this->SendAuthenticationRequest(requestParameters, anisetteData)
+	return this->SendAuthenticationRequest(requestParameters, anisetteData, context)
 	.then([=](plist_t plist) {
 		odslog("FetchAuthToken: response received for " << app);
 		auto encryptedTokenNode = plist_dict_get_item(plist, "et");
@@ -1228,6 +1165,93 @@ pplx::task<std::string> AppleAPI::FetchAuthToken(std::map<std::string, plist_t> 
 }
 
 
+
+// Official AltSign 1599a32/06c4bdd flow, adapted to cpprestsdk.
+pplx::task<bool> AppleAPI::RequestModernTwoFactorCode(
+    std::string dsid, std::string token, altauth::Factor factor,
+    const std::function<pplx::task<std::optional<std::string>>()>& handler,
+    std::shared_ptr<altauth::Context> context)
+{
+    const bool sms = factor == altauth::Factor::sms;
+    auto send = [=](bool validate, const std::string& code) {
+        // In particular, always refresh AFTER the user has typed a code.
+        auto data = ALTRefreshData(context);
+        context->consume(data->oneTimePassword());
+        http_request request(sms ? methods::POST : methods::GET);
+        request.set_request_uri(sms
+            ? (validate ? U("/auth/verify/phone/securitycode?referrer=/auth/verify/phone/put") : U("/auth/verify/phone/put?mode=sms"))
+            : (validate ? U("/grandslam/GsService2/validate") : U("/auth/verify/trusteddevice")));
+        const std::string identity = dsid + ":" + token;
+        auto encoded = utility::conversions::to_base64(std::vector<unsigned char>(identity.begin(), identity.end()));
+        request.headers().add(U("X-Apple-Identity-Token"), encoded);
+        request.headers().add(U("User-Agent"), data->authenticationUserAgent);
+        request.headers().add(U("X-MMe-Client-Info"), data->deviceDescription());
+        request.headers().add(U("X-Apple-I-MD"), data->oneTimePassword());
+        request.headers().add(U("X-Apple-I-MD-M"), data->machineID());
+        request.headers().add(U("X-Apple-I-MD-LU"), data->localUserID());
+        request.headers().add(U("X-Apple-I-MD-RINFO"), std::to_string(data->routingInfo()));
+        request.headers().add(U("X-Mme-Device-Id"), data->deviceUniqueIdentifier());
+        request.headers().add(U("X-Apple-App-Info"), U("com.apple.gs.xcode.auth"));
+        request.headers().add(U("X-Xcode-Version"), U("27.0 (27A5218g)"));
+        request.headers().add(U("Content-Type"), U("text/x-xml-plist"));
+        request.headers().add(U("Accept"), U("text/x-xml-plist"));
+        request.headers().add(U("Accept-Language"), U("en-us"));
+        request.headers().add(U("Connection"), U("close"));
+        char date[64]; time_t stamp = data->date().tv_sec; struct tm tm;
+        gmtime_r(&stamp, &tm); strftime(date, sizeof(date), "%FT%TZ", &tm);
+        request.headers().add(U("X-Apple-I-Client-Time"), date);
+        auto locale = data->locale(); locale = locale.substr(0, locale.find('@'));
+        request.headers().add(U("X-Apple-Locale"), locale);
+        request.headers().add(U("X-Apple-I-TimeZone"), data->timeZone());
+        request.headers().add(U("X-Apple-I-SRL-NO"), data->deviceSerialNumber());
+        if (sms) {
+            auto body = plist_new_dict();
+            auto server = plist_new_dict();
+            plist_dict_set_item(server, "phoneNumber.id", plist_new_string("1"));
+            plist_dict_set_item(body, "serverInfo", server);
+            plist_dict_set_item(server, "mode", plist_new_string("sms"));
+            if (validate) plist_dict_set_item(body, "securityCode.code", plist_new_string(code.c_str()));
+            char* xml = nullptr; uint32_t size = 0; plist_to_xml(body, &xml, &size);
+            request.set_body(std::string(xml, size)); free(xml); plist_free(body);
+        } else if (validate) request.headers().add(U("security-code"), code);
+        ALTApplyGrandSlamCookies(request, context);
+        http_client_config config;
+        config.set_validate_certificates(true);
+        config.set_max_redirects(0);
+        config.set_timeout(std::chrono::seconds(30));
+        auto client = std::make_shared<http_client>(U("https://gsa.apple.com"), config);
+        auto task = context->transport ? context->transport(request) : client->request(request);
+        return task.then([=](http_response response) {
+            altauth::httpStatus(response.status_code());
+            ALTStoreGrandSlamCookies(response, context);
+            if (!validate) return pplx::task_from_result(true);
+            if (sms) {
+                if (response.status_code() != 200 || !response.headers().has(U("X-Apple-PE-Token")))
+                    throw LocalizedError(-21669, altauth::appleError(-21669));
+                return pplx::task_from_result(true);
+            }
+            return response.extract_vector().then([](std::vector<unsigned char> bytes) {
+                if (bytes.size() > 1024 * 1024) throw APIError(APIErrorCode::InvalidResponse);
+                plist_t body = nullptr; plist_from_xml((const char*)bytes.data(), bytes.size(), &body);
+                auto owner = std::shared_ptr<void>(body, [](void* p) { if(p) plist_free((plist_t)p); });
+                if (!body || plist_get_node_type(body) != PLIST_DICT || !plist_dict_get_item(body, "ec"))
+                    throw APIError(APIErrorCode::InvalidResponse);
+                auto code = ALTStatusInteger(body, "ec");
+                if (code) throw LocalizedError(code, altauth::appleError(code));
+                return true;
+            });
+        });
+    };
+    // hsc 409 with no au means Apple already sent a trusted-device code.
+    auto start = factor == altauth::Factor::alreadySent
+        ? pplx::task_from_result(true) : send(false, "");
+    return start.then([=](bool) { return handler(); }).then([=](std::optional<std::string> code) {
+        if (!code) throw APIError(APIErrorCode::RequiresTwoFactorAuthentication);
+        if (code->size() != 6 || code->find_first_not_of("0123456789") != std::string::npos)
+            throw std::runtime_error("Verification code must contain six digits");
+        return send(true, *code);
+    });
+}
 
 pplx::task<bool> AppleAPI::RequestTwoFactorCode(
     std::string dsid,
@@ -1354,7 +1378,9 @@ pplx::task<bool> AppleAPI::RequestTwoFactorCode(
     ALTLogRequestHeaders("SMS INIT", request);
 
     web::http::client::http_client_config config;
-    config.set_validate_certificates(false);
+    config.set_validate_certificates(true);
+    config.set_max_redirects(0);
+    config.set_timeout(std::chrono::seconds(30));
 
     auto client =
         std::make_shared<web::http::client::http_client>(
@@ -1532,8 +1558,8 @@ pplx::task<bool> AppleAPI::RequestTwoFactorCode(
     }
 }
 
-    odslog("SMS init resolved phone ID=" << resolvedPhoneID);
-    odslog("SMS init resolved mode=" << resolvedMode);
+    odslog("SMS init phone selection resolved (redacted)");
+
 
     odslog("SMS challenge requested; waiting for code.");
 
@@ -1634,7 +1660,9 @@ pplx::task<bool> AppleAPI::RequestTwoFactorCode(
                 verifyRequest);
 
             web::http::client::http_client_config verifyConfig;
-            verifyConfig.set_validate_certificates(false);
+            verifyConfig.set_validate_certificates(true);
+            verifyConfig.set_max_redirects(0);
+            verifyConfig.set_timeout(std::chrono::seconds(30));
 
             auto verifyClient =
                 std::make_shared<
@@ -1797,203 +1825,90 @@ pplx::task<std::shared_ptr<Account>> AppleAPI::FetchAccount(std::shared_ptr<Appl
 	return task;
 }
 
-pplx::task<plist_t> AppleAPI::SendAuthenticationRequest(std::map<std::string, plist_t> requestParameters,
-	std::shared_ptr<AnisetteData> anisetteData)
+pplx::task<plist_t> AppleAPI::SendAuthenticationRequest(
+    std::map<std::string, plist_t> requestParameters,
+    std::shared_ptr<AnisetteData> anisetteData,
+    std::shared_ptr<altauth::Context> context)
 {
-	auto header = plist_new_dict();
-	plist_dict_set_item(header, "Version", plist_new_string("1.0.1"));
+    const bool modern = context && context->modern;
+    auto requestDictionary = plist_new_dict();
+    for (auto& parameter : requestParameters)
+        plist_dict_set_item(requestDictionary, parameter.first.c_str(), parameter.second);
+    auto owner = std::shared_ptr<void>(requestDictionary, [](void* p) { plist_free((plist_t)p); });
+    const auto operation = ALTStatusString(requestDictionary, "o");
+    if (modern) {
+        if (operation != "init") ALTRefreshData(context);
+        anisetteData = context->current;
+        context->consume(anisetteData->oneTimePassword());
+        plist_dict_set_item(requestDictionary, "cpd", ALTModernClientDictionary(anisetteData));
+    }
+    auto root = plist_new_dict();
+    auto header = plist_new_dict();
+    plist_dict_set_item(header, "Version", plist_new_string("1.0.1"));
+    plist_dict_set_item(root, "Header", header);
+    plist_dict_set_item(root, "Request", plist_copy(requestDictionary));
+    char* xml = nullptr;
+    uint32_t length = 0;
+    plist_to_xml(root, &xml, &length);
+    std::string body(xml, length);
+    free(xml);
+    plist_free(root);
 
-	auto requestDictionary = plist_new_dict();
-	for (auto& parameter : requestParameters)
-	{
-		plist_dict_set_item(requestDictionary, parameter.first.c_str(), parameter.second);
-	}
-
-	std::map<std::string, plist_t> parameters = {
-		{ "Header", header },
-		{ "Request", requestDictionary }
-	};
-
-	auto plist = plist_new_dict();
-	for (auto& parameter : parameters)
-	{
-		plist_dict_set_item(plist, parameter.first.c_str(), parameter.second);
-	}
-
-	char* plistXML = nullptr;
-	uint32_t length = 0;
-	plist_to_xml(plist, &plistXML, &length);
-   // Match AltKeeper's modern AuthKit transport identity. The Anisette server
-   // supplies X-MMe-Client-Info; do not replace its provisioned device identity.
-	std::map<utility::string_t, utility::string_t> headers = {
-        {U("Content-Type"), U("text/x-xml-plist")},
-        {U("X-MMe-Client-Info"), WideStringFromString(anisetteData->deviceDescription())},
-        {U("Accept"), U("text/x-xml-plist")},
-        {U("User-Agent"), WideStringFromString(ALTAuthKitUserAgent())},
-        {U("X-Xcode-Version"), U("27.0 (27A5218g)")},
-        {U("X-Apple-App-Info"), U("com.apple.gs.xcode.auth")},
-        {U("Connection"), U("close")}
-};
-	uri_builder builder(U("/grandslam/GsService2"));
-
-	http_request request(methods::POST);
-	request.set_request_uri(builder.to_string());
-	request.set_body(plistXML);
-
-	for (auto& pair : headers)
-	{
-		if (request.headers().has(pair.first))
-		{
-			request.headers().remove(pair.first);
-		}
-
-		request.headers().add(pair.first, pair.second);
-	}
-   // Preserve cookies from prior GrandSlam requests even though this request
-   // deliberately uses a fresh http_client below.
-   ALTApplyGrandSlamCookies(request);
-
-   //edit HR, line commented below
-	//auto task = this->gsaClient().request(request) 
-	//added following block until auto task =
-	web::http::client::http_client_config config;
-   config.set_validate_certificates(false);
-
-   auto freshGsaClient = std::make_shared<web::http::client::http_client>(
-    U("https://gsa.apple.com"),config);
-
-   auto task = freshGsaClient->request(request)
-		.then([=](http_response response)
-			{
-				ALTStoreGrandSlamCookies(response);
-				return response.content_ready();
-			})
-		
-		
-		.then([=](http_response response)
-{
-    odslog("Received auth response status code: " << response.status_code());
-    return response.extract_vector();
-})
-.then([=](std::vector<unsigned char> compressedData)
-{
-    odslog("Auth response: body extracted, size=" << compressedData.size());
-
-    
-		
-		
-		
-		
-						std::vector<uint8_t> decompressedData = compressedData;
-
-						std::string decompressedXML = std::string(decompressedData.begin(), decompressedData.end());
-
-						plist_t plist = nullptr;
-						plist_from_xml(decompressedXML.c_str(), (int)decompressedXML.size(), &plist);
-						odslog("Auth response: plist_from_xml completed");
-
-						if (plist == nullptr)
-						{
-							odslog("Auth response: ERROR plist parse failed");
-							throw APIError(APIErrorCode::InvalidResponse);
-						}
-
-						odslog("Auth response: plist parse SUCCESS");
-						return plist;
-					})
-		.then([=](plist_t plist)
-				{
-				auto dictionary = plist_dict_get_item(plist, "Response");
-				odslog("Auth response: checking Response dictionary");
-
-if (dictionary == NULL)
-{
-    odslog("Auth response: ERROR missing Response dictionary");
-    throw APIError(APIErrorCode::InvalidResponse);
-}
-
-odslog("Auth response: Response dictionary present");
-
-auto statusNode = plist_dict_get_item(dictionary, "Status");
-if (statusNode == NULL)
-{
-    odslog("Auth response: ERROR missing Status dictionary");
-    throw APIError(APIErrorCode::InvalidResponse);
-}
-
-odslog("Auth response: Status dictionary present");
-
-				auto node = plist_dict_get_item(statusNode, "ec");
-				int64_t resultCode = 0;
-				
-				auto type = plist_get_node_type(node);
-				switch (type)
-				{
-				case PLIST_STRING:
-				{
-					char* value = nullptr;
-					plist_get_string_val(node, &value);
-
-					resultCode = atoi(value);
-					break;
-				}
-
-				case PLIST_UINT:
-				{
-					uint64_t value = 0;
-					plist_get_uint_val(node, &value);
-
-					resultCode = (int64_t)value;
-					break;
-				}
-
-				case PLIST_REAL:
-				{
-					double value = 0;
-					plist_get_real_val(node, &value);
-
-					resultCode = (int64_t)value;
-					break;
-				}
-
-				default:
-					break;
-				}
-				//odslog("Auth response: GrandSlam ec=" << resultCode << " em=" << errorDescription);
-				odslog("Auth response: GrandSlam ec=" << resultCode);
-				switch (resultCode)
-				{
-				case 0: return dictionary;
-				case -29004: throw APIError(APIErrorCode::InvalidAnisetteData);
-				default:
-				{
-					auto descriptionNode = plist_dict_get_item(statusNode, "em");
-					if (descriptionNode == nullptr)
-					{
-						throw APIError(APIErrorCode::InvalidResponse);
-					}
-
-					char* errorDescription = nullptr;
-					plist_get_string_val(descriptionNode, &errorDescription);
-
-					if (errorDescription == nullptr)
-					{
-						throw APIError(APIErrorCode::InvalidResponse);
-					}
-
-					odslog("Auth response: GrandSlam ERROR ec=" << resultCode
-       << " em=" << errorDescription);
-
-std::stringstream ss;
-ss << errorDescription << " (" << resultCode << ")";
-
-throw LocalizedError((int)resultCode, ss.str());
-				}
-				}
-          });
-
-		free(plistXML);
-		plist_free(plist);
-
-		return task;
+    http_request request(methods::POST);
+    request.set_request_uri(U("/grandslam/GsService2"));
+    request.set_body(body);
+    request.headers().add(U("Content-Type"), U("text/x-xml-plist"));
+    request.headers().add(U("Accept"), U("text/x-xml-plist"));
+    request.headers().add(U("User-Agent"), modern ? anisetteData->authenticationUserAgent : ALTAuthKitUserAgent());
+    request.headers().add(U("X-MMe-Client-Info"), anisetteData->deviceDescription());
+    request.headers().add(U("X-Xcode-Version"), U("27.0 (27A5218g)"));
+    request.headers().add(U("X-Apple-App-Info"), U("com.apple.gs.xcode.auth"));
+    request.headers().add(U("Connection"), U("close"));
+    ALTApplyGrandSlamCookies(request, context);
+    http_client_config config;
+    config.set_validate_certificates(true);
+    config.set_max_redirects(0);
+    config.set_timeout(std::chrono::seconds(30));
+    auto client = std::make_shared<http_client>(U("https://gsa.apple.com"), config);
+    auto task = context && context->transport ? context->transport(request) : client->request(request);
+    return task.then([=](http_response response) {
+        // Classify HTTP errors before interpreting the body as a property list.
+        altauth::httpStatus(response.status_code());
+        ALTStoreGrandSlamCookies(response, context);
+        return response.extract_vector();
+    }).then([=](std::vector<unsigned char> bytes) -> pplx::task<plist_t> {
+        (void)owner; // retain request nodes until the optional resync retry is built
+        if (bytes.size() > 1024 * 1024) throw APIError(APIErrorCode::InvalidResponse);
+        plist_t parsed = nullptr;
+        plist_from_xml((const char*)bytes.data(), bytes.size(), &parsed);
+        auto parsedOwner = std::shared_ptr<void>(parsed, [](void* p) { if (p) plist_free((plist_t)p); });
+        auto dictionary = parsed ? plist_dict_get_item(parsed, "Response") : nullptr;
+        auto status = dictionary ? plist_dict_get_item(dictionary, "Status") : nullptr;
+        if (!status || plist_get_node_type(status) != PLIST_DICT)
+            throw APIError(APIErrorCode::InvalidResponse);
+        if (ALTStatusInteger(status, "hsc") == 434) {
+            // Resync is valid only for init. Retry once, preserving its A2k/SRP context.
+            if (!modern || operation != "init") throw APIError(APIErrorCode::InvalidAnisetteData);
+            auto simNode = plist_dict_get_item(status, "X-Apple-I-MD-DATA");
+            std::string sim;
+            if (simNode && plist_get_node_type(simNode) == PLIST_STRING)
+                sim = ALTStatusString(status, "X-Apple-I-MD-DATA");
+            else if (simNode && plist_get_node_type(simNode) == PLIST_DATA) {
+                char* raw = nullptr; uint64_t size = 0;
+                plist_get_data_val(simNode, &raw, &size);
+                if (size <= 49152) sim = utility::conversions::to_base64(DataFromBytes(raw, size));
+                free(raw);
+            }
+            context->beginResync(sim);
+            ALTUseFreshData(context, context->resync(sim));
+            std::map<std::string, plist_t> retry;
+            for (const auto& parameter : requestParameters)
+                retry[parameter.first] = plist_copy(plist_dict_get_item(requestDictionary, parameter.first.c_str()));
+            return this->SendAuthenticationRequest(retry, context->current, context);
+        }
+        const auto code = ALTStatusInteger(status, "ec");
+        if (code == -29004) throw APIError(APIErrorCode::InvalidAnisetteData);
+        if (code != 0) throw LocalizedError(code, altauth::appleError(code));
+        return pplx::task_from_result(plist_copy(dictionary));
+    });
 }

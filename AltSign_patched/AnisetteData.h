@@ -3,7 +3,7 @@
 //  AltSign-Windows
 //
 //  Created by Riley Testut on 11/26/19.
-//  Copyright © 2019 Riley Testut. All rights reserved.
+//  Copyright Â© 2019 Riley Testut. All rights reserved.
 //
 
 #pragma once
@@ -37,6 +37,8 @@ public:
 		std::string locale,
 		std::string timeZone);
 
+	// Process-local transport metadata; unchanged phone wire format.
+	std::string authenticationUserAgent;
 	std::string machineID() const;
 	std::string oneTimePassword() const;
 	std::string localUserID() const;
