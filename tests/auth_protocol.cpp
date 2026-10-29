@@ -10,7 +10,10 @@ using namespace altauth;
 static void check(bool ok) { if (!ok) throw std::runtime_error("Protocol assertion failed"); }
 template<class F> static void fails(F action, const std::string& expected = "") {
     try { action(); } catch (const std::exception& e) {
-        check(expected.empty() || std::string(e.what()).find(expected) != std::string::npos); return;
+        auto error = dynamic_cast<const Error*>(&e);
+        const auto message = error ? error->localizedDescription() : std::string(e.what());
+        check(message.find("PRIVATE-ACCOUNT") == std::string::npos);
+        check(expected.empty() || message.find(expected) != std::string::npos); return;
     }
     throw std::runtime_error("Expected protocol failure");
 }
@@ -35,7 +38,9 @@ static auto context() {
 }
 struct AuthProtocolTests {
     static auto send(const std::shared_ptr<Context>& c, const std::string& op = "init") {
-        std::map<std::string, plist_t> params{{"o", plist_new_string(op.c_str())},
+        auto cpd = plist_new_dict();
+        plist_dict_set_item(cpd, "bootstrap", plist_new_bool(true));
+        std::map<std::string, plist_t> params{{"cpd",cpd},{"o", plist_new_string(op.c_str())},
             {"u", plist_new_string("synthetic@example.invalid")}, {"A2k", plist_new_data("synthetic-public-key",20)}};
         return AppleAPI::getInstance()->SendAuthenticationRequest(params, c->current, c);
     }
@@ -58,6 +63,17 @@ struct AuthProtocolTests {
         check(altauth::factor("secondaryAuth",200) == Factor::sms);
         check(altauth::factor("",200) == Factor::none);
         fails([] { altauth::factor("unrecognized",200); });
+
+        auto legacy = context(); legacy->modern = false;
+        legacy->transport = [](http_request req) {
+            check(req.headers()["User-Agent"] == "AuthKit/1 (Macintosh; OS X 26.5.2) (com.apple.dt.Xcode/26.0)");
+            auto xml = req.extract_string().get(); plist_t root = nullptr;
+            plist_from_xml(xml.data(),xml.size(),&root);
+            auto cpd = plist_dict_get_item(plist_dict_get_item(root,"Request"),"cpd");
+            check(plist_get_node_type(plist_dict_get_item(cpd,"bootstrap")) == PLIST_BOOLEAN);
+            plist_free(root); return pplx::task_from_result(response("<key>ec</key><integer>0</integer>"));
+        };
+        plist_free(send(legacy).get()); check(legacy->usedPasswords.empty());
 
         // Actual wire headers and CPD after a provider refresh, including resync.
         auto c = context(); int requests = 0; std::string publicKey;
@@ -102,6 +118,20 @@ struct AuthProtocolTests {
             f->transport = [&](http_request) { ++calls; http_response r(status); r.set_body("<html>PRIVATE-ACCOUNT</html>"); return pplx::task_from_result(r); };
             fails([&] { send(f).get(); }, "HTTP " + std::to_string(status)); check(calls == 1);
         }
+        auto malformed = context(); malformed->transport = [](http_request) {
+            http_response r(200); r.set_body("<html>PRIVATE-ACCOUNT</html>"); return pplx::task_from_result(r);
+        };
+        fails([&] { send(malformed).get(); });
+        auto binary = context(); binary->resync = [](const std::string& sim) { check(sim == "c2lt"); return data("binary-resync"); };
+        binary->transport = [binary](http_request) { return pplx::task_from_result(response(binary->resyncs == 0
+            ? "<key>hsc</key><integer>434</integer><key>X-Apple-I-MD-DATA</key><data>c2lt</data>"
+            : "<key>ec</key><integer>0</integer>")); };
+        plist_free(send(binary).get()); check(binary->resyncs == 1);
+        auto later = context(); later->transport = [](http_request) {
+            return pplx::task_from_result(response("<key>hsc</key><integer>434</integer>"));
+        };
+        fails([&] { send(later,"complete").get(); });
+
         auto reused = context(); reused->refresh = [] { return data("otp-0"); };
         reused->transport = [](http_request) { return pplx::task_from_result(response("")); };
         plist_free(send(reused).get()); fails([&] { send(reused,"complete").get(); },"reused");
@@ -128,6 +158,16 @@ struct AuthProtocolTests {
             check(factor(f,type,prompt).get()); check(calls == (type == Factor::alreadySent ? 1 : 2));
             check(!f->cookies.empty() && context()->cookies.empty());
         }
+        for (auto type : {Factor::alreadySent,Factor::sms}) {
+            auto rejected = context();
+            rejected->transport = [type](http_request) {
+                http_response r(200);
+                if (type != Factor::sms) r.set_body("<plist><dict><key>ec</key><integer>-21669</integer><key>em</key><string>PRIVATE-ACCOUNT</string></dict></plist>");
+                return pplx::task_from_result(r);
+            };
+            fails([&] { factor(rejected,type,[] { return pplx::task_from_result(std::optional<std::string>("123456")); }).get(); },"-21669");
+        }
+
         auto cancelled = context(); cancelled->transport = [](http_request) -> pplx::task<http_response> { throw std::runtime_error("Should not send"); };
         fails([&] { factor(cancelled,Factor::alreadySent,[] { return pplx::task_from_result(std::optional<std::string>()); }).get(); });
         Context bounded; bounded.beginFactor(); fails([&] { bounded.beginFactor(); });

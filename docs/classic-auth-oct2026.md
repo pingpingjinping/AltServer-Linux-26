@@ -67,11 +67,13 @@ headers and must be tested separately after its update.
   503 is not treated as proof of rate limiting or of an identity mismatch.
 * The modern cookie jar belongs to one transaction and survives its 2FA restart.
 * Certificate verification is enabled for **both modes**, including the old
-  authentication/SMS clients that previously explicitly disabled it. Redirects
+  authentication/SMS clients that previously explicitly disabled it. The dormant,
+  uncompiled duplicate authentication source is also hardened to prevent future reuse. Redirects
   are disabled for authentication; timeouts are bounded. TLS hardening is an
   intentional security change to the legacy transport. There is no insecure
   fallback, system trust modification, or bundled CA imported from PR #4.
 
+Anisette stream diagnostics now redact OTPs and personal device identifiers.
 Existing AltKeeper scripts and normal renewal path, provider settings and ADI
 files are untouched. The adapter below does not use Keeper RPC or create state.
 

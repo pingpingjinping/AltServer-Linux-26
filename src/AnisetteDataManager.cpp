@@ -176,6 +176,7 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData(std::string
                     for (const auto& key : {"authenticationUserAgent", "provisionedClientInfo", "provisionedUserAgent"})
                         if (!jsonVal.has_string_field(key))
                             throw std::runtime_error("Anisette adapter lacks provisioning identity metadata");
+                    for (const auto& key : keys) altauth::headerValue(jsonVal.at(key).as_string());
                     const auto agent = jsonVal.at("authenticationUserAgent").as_string();
                     altauth::identity(anisetteData->deviceDescription(), agent,
                         jsonVal.at("provisionedClientInfo").as_string(),
