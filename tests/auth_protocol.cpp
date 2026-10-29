@@ -24,6 +24,11 @@ static auto data(const std::string& otp) {
     result->authenticationUserAgent = "synthetic-provider-agent";
     return result;
 }
+static std::string body(http_request request) {
+    // plist media types have no text charset; inspect bytes like production.
+    auto bytes = request.extract_vector().get();
+    return std::string(bytes.begin(), bytes.end());
+}
 static http_response response(const std::string& status, unsigned http = 200) {
     http_response result(http);
     result.set_body("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Response</key><dict><key>Status</key><dict>" + status + "</dict></dict></dict></plist>");
@@ -67,7 +72,7 @@ struct AuthProtocolTests {
         auto legacy = context(); legacy->modern = false;
         legacy->transport = [](http_request req) {
             check(req.headers()["User-Agent"] == "AuthKit/1 (Macintosh; OS X 26.5.2) (com.apple.dt.Xcode/26.0)");
-            auto xml = req.extract_string().get(); plist_t root = nullptr;
+            auto xml = body(req); plist_t root = nullptr;
             plist_from_xml(xml.data(),xml.size(),&root);
             auto cpd = plist_dict_get_item(plist_dict_get_item(root,"Request"),"cpd");
             check(plist_get_node_type(plist_dict_get_item(cpd,"bootstrap")) == PLIST_BOOLEAN);
@@ -82,7 +87,7 @@ struct AuthProtocolTests {
             ++requests;
             check(req.headers()["User-Agent"] == c->current->authenticationUserAgent);
             check(req.headers()["X-MMe-Client-Info"] == c->current->deviceDescription());
-            auto xml = req.extract_string().get();
+            auto xml = body(req);
             plist_t root = nullptr; plist_from_xml(xml.data(), xml.size(), &root);
             auto r = plist_dict_get_item(root,"Request");
             auto cpd = plist_dict_get_item(r,"cpd"); check(plist_dict_get_size(cpd) == 9);
@@ -147,7 +152,7 @@ struct AuthProtocolTests {
                 bool validate = req.request_uri().to_string().find("validate") != std::string::npos || req.request_uri().to_string().find("securitycode") != std::string::npos;
                 check(validate == prompted);
                 if (validate && type != Factor::sms) check(req.headers()["security-code"] == "123456");
-                if (validate && type == Factor::sms) check(req.extract_string().get().find("securityCode.code") != std::string::npos);
+                if (validate && type == Factor::sms) check(body(req).find("securityCode.code") != std::string::npos);
                 http_response r(200);
                 r.headers().add("Set-Cookie","test=synthetic-cookie; Secure");
                 if (type == Factor::sms && validate) r.headers().add("X-Apple-PE-Token","synthetic-pe");
